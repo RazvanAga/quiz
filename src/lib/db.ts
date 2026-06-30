@@ -7,36 +7,55 @@ import path from "node:path";
 const DATA_DIR = path.join(process.cwd(), "data");
 const DB_PATH = path.join(DATA_DIR, "quiz.db");
 
-let db: Database.Database | null = null;
+const SCHEMA = `
+  CREATE TABLE IF NOT EXISTS quiz (
+    id         TEXT PRIMARY KEY,
+    title      TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 
-export function getDb(): Database.Database {
-  if (db) return db;
+  CREATE TABLE IF NOT EXISTS question (
+    id                TEXT PRIMARY KEY,
+    quiz_id           TEXT NOT NULL REFERENCES quiz(id) ON DELETE CASCADE,
+    position          INTEGER NOT NULL,
+    type              TEXT NOT NULL CHECK (type IN ('single', 'truefalse')),
+    text              TEXT NOT NULL DEFAULT '',
+    image_url         TEXT,
+    correct_option_id TEXT,
+    time_limit_sec    INTEGER NOT NULL,
+    points            INTEGER NOT NULL,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 
-  mkdirSync(DATA_DIR, { recursive: true });
+  CREATE TABLE IF NOT EXISTS option (
+    id          TEXT PRIMARY KEY,
+    question_id TEXT NOT NULL REFERENCES question(id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL,
+    text        TEXT NOT NULL DEFAULT ''
+  );
 
-  db = new Database(DB_PATH);
+  CREATE INDEX IF NOT EXISTS idx_question_quiz ON question(quiz_id, position);
+  CREATE INDEX IF NOT EXISTS idx_option_question ON option(question_id, position);
+`;
+
+// Opens a SQLite connection at `filename` (a path, or ":memory:" for tests),
+// enables WAL + foreign keys, and ensures the schema exists.
+export function openDatabase(filename: string): Database.Database {
+  const db = new Database(filename);
   db.pragma("journal_mode = WAL");
-
-  // Walking-skeleton proof table: a trivial place to read/write through SQLite.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS health (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      note       TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
-
+  db.pragma("foreign_keys = ON");
+  db.exec(SCHEMA);
   return db;
 }
 
-// Writes one health row and reads back the running total — exercises the full
-// read/write path through SQLite for the scaffold.
-export function recordHealthCheck(note: string): { count: number; journalMode: string } {
-  const conn = getDb();
-  conn.prepare("INSERT INTO health (note) VALUES (?)").run(note);
-  const { count } = conn.prepare("SELECT COUNT(*) AS count FROM health").get() as {
-    count: number;
-  };
-  const journalMode = conn.pragma("journal_mode", { simple: true }) as string;
-  return { count, journalMode };
+let singleton: Database.Database | null = null;
+
+// The app's shared connection, opened lazily against data/quiz.db.
+export function getDb(): Database.Database {
+  if (singleton) return singleton;
+  mkdirSync(DATA_DIR, { recursive: true });
+  singleton = openDatabase(DB_PATH);
+  return singleton;
 }
