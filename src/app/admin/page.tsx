@@ -2,6 +2,7 @@ import Link from "next/link";
 import { quizRepository } from "@/lib/quiz-repo";
 import { createQuizAction, deleteQuizAction } from "./actions";
 import { ConfirmButton } from "./confirm-button";
+import { StartGameButton } from "./start-game-button";
 
 // The /admin Quiz library: every Quiz with its title, Question count, and when
 // it was last played. (nginx Basic Auth gates this area in #13; no app auth.)
@@ -57,6 +58,12 @@ export default function AdminLibraryPage() {
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-3">
+                {quiz.questionCount > 0 && (
+                  <StartGameButton
+                    quizId={quiz.id}
+                    className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
+                  />
+                )}
                 <Link
                   href={`/admin/quiz/${quiz.id}`}
                   className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800"

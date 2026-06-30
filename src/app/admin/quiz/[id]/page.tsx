@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { quizRepository } from "@/lib/quiz-repo";
 import { POINT_VALUES, TIME_LIMITS_SEC, type Question } from "@/lib/quiz-model";
 import { ConfirmButton } from "../../confirm-button";
+import { StartGameButton } from "../../start-game-button";
 import { QuestionList } from "./question-list";
 import {
   addQuestionAction,
@@ -33,9 +34,17 @@ export default async function QuizEditorPage({
 
   return (
     <main className="mx-auto max-w-3xl px-6 py-12">
-      <Link href="/admin" className="text-sm text-slate-400 hover:text-indigo-400">
-        ← Quiz library
-      </Link>
+      <div className="flex items-center justify-between">
+        <Link href="/admin" className="text-sm text-slate-400 hover:text-indigo-400">
+          ← Quiz library
+        </Link>
+        {quiz.questions.length > 0 && (
+          <StartGameButton
+            quizId={quiz.id}
+            className="rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
+          />
+        )}
+      </div>
 
       <form action={renameQuizAction} className="mb-8 mt-4 flex gap-3">
         <input type="hidden" name="quizId" value={quiz.id} />
