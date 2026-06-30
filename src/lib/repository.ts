@@ -4,9 +4,11 @@ import {
   DEFAULT_POINTS,
   DEFAULT_TIME_LIMIT_SEC,
   SINGLE_CHOICE_OPTION_COUNT,
+  TRUE_FALSE_OPTION_TEXTS,
   type Option,
   type Question,
   type QuestionInput,
+  type QuestionType,
   type Quiz,
   type QuizSummary,
 } from "./quiz-model";
@@ -47,8 +49,9 @@ export interface QuizRepository {
   getQuiz(id: string): Quiz | null;
   updateQuizTitle(id: string, title: string): void;
   deleteQuiz(id: string): void;
-  addQuestion(quizId: string): Question;
+  addQuestion(quizId: string, type?: QuestionType): Question;
   updateQuestion(questionId: string, input: QuestionInput): Question;
+  reorderQuestions(quizId: string, orderedIds: string[]): void;
   deleteQuestion(questionId: string): void;
 }
 
@@ -144,7 +147,15 @@ export function createQuizRepository(db: Database.Database): QuizRepository {
       db.prepare("DELETE FROM quiz WHERE id = ?").run(id);
     },
 
-    addQuestion(quizId: string): Question {
+    addQuestion(quizId: string, type: QuestionType = "single"): Question {
+      // Single-choice gets 4 blank Options to fill in; True/False gets exactly
+      // 2 fixed Options. Either way the first Option is correct by default, so
+      // the Question always satisfies the one-correct-Option invariant.
+      const optionTexts =
+        type === "truefalse"
+          ? [...TRUE_FALSE_OPTION_TEXTS]
+          : Array.from({ length: SINGLE_CHOICE_OPTION_COUNT }, () => "");
+
       const create = db.transaction((): string => {
         const { next } = db
           .prepare(
@@ -153,20 +164,28 @@ export function createQuizRepository(db: Database.Database): QuizRepository {
           .get(quizId) as { next: number };
 
         const questionId = randomUUID();
-        const optionIds = Array.from({ length: SINGLE_CHOICE_OPTION_COUNT }, () =>
-          randomUUID(),
-        );
+        const optionIds = optionTexts.map(() => randomUUID());
 
         db.prepare(
           `INSERT INTO question
              (id, quiz_id, position, type, text, correct_option_id, time_limit_sec, points)
-           VALUES (?, ?, ?, 'single', '', ?, ?, ?)`,
-        ).run(questionId, quizId, next, optionIds[0], DEFAULT_TIME_LIMIT_SEC, DEFAULT_POINTS);
+           VALUES (?, ?, ?, ?, '', ?, ?, ?)`,
+        ).run(
+          questionId,
+          quizId,
+          next,
+          type,
+          optionIds[0],
+          DEFAULT_TIME_LIMIT_SEC,
+          DEFAULT_POINTS,
+        );
 
         const insertOption = db.prepare(
-          "INSERT INTO option (id, question_id, position, text) VALUES (?, ?, ?, '')",
+          "INSERT INTO option (id, question_id, position, text) VALUES (?, ?, ?, ?)",
         );
-        optionIds.forEach((optionId, i) => insertOption.run(optionId, questionId, i));
+        optionIds.forEach((optionId, i) =>
+          insertOption.run(optionId, questionId, i, optionTexts[i]),
+        );
 
         touchQuiz.run(quizId);
         return questionId;
@@ -209,6 +228,35 @@ export function createQuizRepository(db: Database.Database): QuizRepository {
 
       apply();
       return toQuestion(getQuestionRow(questionId));
+    },
+
+    reorderQuestions(quizId: string, orderedIds: string[]): void {
+      const apply = db.transaction(() => {
+        const currentIds = (
+          db
+            .prepare("SELECT id FROM question WHERE quiz_id = ?")
+            .all(quizId) as { id: string }[]
+        ).map((r) => r.id);
+
+        // orderedIds must be exactly this Quiz's Questions, each once — anything
+        // else would drop or duplicate a Question's position.
+        const isPermutation =
+          orderedIds.length === currentIds.length &&
+          new Set(orderedIds).size === orderedIds.length &&
+          orderedIds.every((id) => currentIds.includes(id));
+        if (!isPermutation) {
+          throw new Error("orderedIds must be a permutation of the Quiz's Questions");
+        }
+
+        const setPosition = db.prepare(
+          "UPDATE question SET position = ? WHERE id = ? AND quiz_id = ?",
+        );
+        orderedIds.forEach((id, i) => setPosition.run(i, id, quizId));
+
+        touchQuiz.run(quizId);
+      });
+
+      apply();
     },
 
     deleteQuestion(questionId: string): void {

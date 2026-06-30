@@ -9,6 +9,8 @@ import {
   DEFAULT_POINTS,
   DEFAULT_TIME_LIMIT_SEC,
   SINGLE_CHOICE_OPTION_COUNT,
+  TRUE_FALSE_OPTION_COUNT,
+  TRUE_FALSE_OPTION_TEXTS,
 } from "./quiz-model";
 
 let db: Database.Database;
@@ -139,6 +141,37 @@ describe("Question authoring", () => {
     ).toThrow();
   });
 
+  it("adds a True/False Question (2 fixed Options, first correct)", () => {
+    const quiz = repo.createQuiz("Trivia");
+    const q = repo.addQuestion(quiz.id, "truefalse");
+
+    expect(q.type).toBe("truefalse");
+    expect(q.timeLimitSec).toBe(DEFAULT_TIME_LIMIT_SEC);
+    expect(q.points).toBe(DEFAULT_POINTS);
+    expect(q.options).toHaveLength(TRUE_FALSE_OPTION_COUNT);
+    expect(q.options.map((o) => o.text)).toEqual([...TRUE_FALSE_OPTION_TEXTS]);
+    // The first Option ("True") is the default correct one.
+    expect(q.correctOptionId).toBe(q.options[0].id);
+  });
+
+  it("lets a True/False Question's correct Option be flipped to False", () => {
+    const quiz = repo.createQuiz("Trivia");
+    const q = repo.addQuestion(quiz.id, "truefalse");
+
+    const updated = repo.updateQuestion(q.id, {
+      text: "The sky is green.",
+      timeLimitSec: 10,
+      points: 500,
+      options: q.options,
+      correctOptionId: q.options[1].id,
+    });
+
+    expect(updated.correctOptionId).toBe(q.options[1].id);
+    expect(repo.getQuiz(quiz.id)!.questions[0].correctOptionId).toBe(
+      q.options[1].id,
+    );
+  });
+
   it("deletes a Question and its Options without touching the Quiz", () => {
     const quiz = repo.createQuiz("Capitals");
     const a = repo.addQuestion(quiz.id);
@@ -151,6 +184,34 @@ describe("Question authoring", () => {
     expect(
       db.prepare("SELECT COUNT(*) AS n FROM option WHERE question_id = ?").get(a.id),
     ).toEqual({ n: 0 });
+  });
+});
+
+describe("reordering Questions", () => {
+  it("rewrites positions to the given order and persists it", () => {
+    const quiz = repo.createQuiz("Capitals");
+    const a = repo.addQuestion(quiz.id);
+    const b = repo.addQuestion(quiz.id);
+    const c = repo.addQuestion(quiz.id);
+
+    repo.reorderQuestions(quiz.id, [c.id, a.id, b.id]);
+
+    const fetched = repo.getQuiz(quiz.id)!;
+    expect(fetched.questions.map((q) => q.id)).toEqual([c.id, a.id, b.id]);
+    expect(fetched.questions.map((q) => q.position)).toEqual([0, 1, 2]);
+  });
+
+  it("rejects an order that is not a permutation of the Quiz's Questions", () => {
+    const quiz = repo.createQuiz("Capitals");
+    const a = repo.addQuestion(quiz.id);
+    const b = repo.addQuestion(quiz.id);
+
+    // Missing one id.
+    expect(() => repo.reorderQuestions(quiz.id, [a.id])).toThrow();
+    // An id that does not belong to this Quiz.
+    expect(() =>
+      repo.reorderQuestions(quiz.id, [a.id, b.id, "stranger"]),
+    ).toThrow();
   });
 });
 

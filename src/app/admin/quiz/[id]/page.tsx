@@ -1,8 +1,10 @@
+import type { ReactNode } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { quizRepository } from "@/lib/quiz-repo";
 import { POINT_VALUES, TIME_LIMITS_SEC, type Question } from "@/lib/quiz-model";
 import { ConfirmButton } from "../../confirm-button";
+import { QuestionList } from "./question-list";
 import {
   addQuestionAction,
   deleteQuestionAction,
@@ -20,6 +22,14 @@ export default async function QuizEditorPage({
   const { id } = await params;
   const quiz = quizRepository().getQuiz(id);
   if (!quiz) notFound();
+
+  // Keyed by Question id so the drag-reorder client can render them in any order.
+  const cards: Record<string, ReactNode> = Object.fromEntries(
+    quiz.questions.map((question, i) => [
+      question.id,
+      <QuestionCard quizId={quiz.id} question={question} index={i} />,
+    ]),
+  );
 
   return (
     <main className="mx-auto max-w-3xl px-6 py-12">
@@ -44,26 +54,36 @@ export default async function QuizEditorPage({
         </button>
       </form>
 
-      <div className="space-y-6">
-        {quiz.questions.map((question, i) => (
-          <QuestionCard
-            key={question.id}
-            quizId={quiz.id}
-            question={question}
-            index={i}
-          />
-        ))}
-      </div>
+      {quiz.questions.length > 0 ? (
+        <QuestionList quizId={quiz.id} ids={quiz.questions.map((q) => q.id)} cards={cards} />
+      ) : (
+        <p className="rounded-xl border border-dashed border-slate-800 px-6 py-8 text-center text-slate-500">
+          No Questions yet. Add one below.
+        </p>
+      )}
 
-      <form action={addQuestionAction} className="mt-8">
-        <input type="hidden" name="quizId" value={quiz.id} />
-        <button
-          type="submit"
-          className="w-full rounded-xl border border-dashed border-slate-700 px-6 py-4 font-semibold text-slate-300 hover:border-indigo-500 hover:text-indigo-400"
-        >
-          + Add Question
-        </button>
-      </form>
+      <div className="mt-8 grid grid-cols-2 gap-3">
+        <form action={addQuestionAction}>
+          <input type="hidden" name="quizId" value={quiz.id} />
+          <input type="hidden" name="type" value="single" />
+          <button
+            type="submit"
+            className="w-full rounded-xl border border-dashed border-slate-700 px-6 py-4 font-semibold text-slate-300 hover:border-indigo-500 hover:text-indigo-400"
+          >
+            + Add single-choice
+          </button>
+        </form>
+        <form action={addQuestionAction}>
+          <input type="hidden" name="quizId" value={quiz.id} />
+          <input type="hidden" name="type" value="truefalse" />
+          <button
+            type="submit"
+            className="w-full rounded-xl border border-dashed border-slate-700 px-6 py-4 font-semibold text-slate-300 hover:border-indigo-500 hover:text-indigo-400"
+          >
+            + Add True/False
+          </button>
+        </form>
+      </div>
     </main>
   );
 }
@@ -77,11 +97,13 @@ function QuestionCard({
   question: Question;
   index: number;
 }) {
+  const isTrueFalse = question.type === "truefalse";
+
   return (
     <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
       <div className="mb-4 flex items-center justify-between">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
-          Question {index + 1} · single-choice
+          Question {index + 1} · {isTrueFalse ? "True/False" : "single-choice"}
         </h2>
         <form action={deleteQuestionAction}>
           <input type="hidden" name="quizId" value={quizId} />
@@ -109,7 +131,9 @@ function QuestionCard({
 
         <fieldset className="space-y-2">
           <legend className="mb-1 text-xs text-slate-500">
-            Four Options — select the one correct Option
+            {isTrueFalse
+              ? "Two fixed Options — select the correct one"
+              : "Four Options — select the one correct Option"}
           </legend>
           {question.options.map((option, i) => (
             <div key={option.id} className="flex items-center gap-3">
@@ -123,13 +147,23 @@ function QuestionCard({
                 aria-label={`Mark Option ${i + 1} correct`}
                 className="h-4 w-4 accent-emerald-500"
               />
-              <input
-                name="optionText"
-                defaultValue={option.text}
-                placeholder={`Option ${i + 1}`}
-                aria-label={`Option ${i + 1} text`}
-                className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none"
-              />
+              {isTrueFalse ? (
+                <>
+                  {/* Texts are fixed for True/False; carry them through unchanged. */}
+                  <input type="hidden" name="optionText" value={option.text} />
+                  <span className="flex-1 rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-slate-100">
+                    {option.text}
+                  </span>
+                </>
+              ) : (
+                <input
+                  name="optionText"
+                  defaultValue={option.text}
+                  placeholder={`Option ${i + 1}`}
+                  aria-label={`Option ${i + 1} text`}
+                  className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none"
+                />
+              )}
             </div>
           ))}
         </fieldset>

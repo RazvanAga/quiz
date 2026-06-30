@@ -16,6 +16,11 @@ export const DEFAULT_TIME_LIMIT_SEC: TimeLimitSec = 20;
 export const DEFAULT_POINTS: PointValue = 1000;
 export const SINGLE_CHOICE_OPTION_COUNT = 4;
 
+// A True/False Question has exactly two fixed Options (still Options, per
+// docs/CONTEXT.md), in this order, with the first ("True") correct by default.
+export const TRUE_FALSE_OPTION_TEXTS = ["True", "False"] as const;
+export const TRUE_FALSE_OPTION_COUNT = TRUE_FALSE_OPTION_TEXTS.length;
+
 export interface Option {
   id: string;
   text: string;

@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { quizRepository } from "@/lib/quiz-repo";
-import type { Option } from "@/lib/quiz-model";
+import type { Option, QuestionType } from "@/lib/quiz-model";
 
 function revalidateEditor(quizId: string): void {
   revalidatePath(`/admin/quiz/${quizId}`);
@@ -20,7 +20,18 @@ export async function renameQuizAction(formData: FormData): Promise<void> {
 export async function addQuestionAction(formData: FormData): Promise<void> {
   const quizId = String(formData.get("quizId") ?? "");
   if (!quizId) return;
-  quizRepository().addQuestion(quizId);
+  const type: QuestionType =
+    formData.get("type") === "truefalse" ? "truefalse" : "single";
+  quizRepository().addQuestion(quizId, type);
+  revalidateEditor(quizId);
+}
+
+export async function reorderQuestionsAction(
+  quizId: string,
+  orderedIds: string[],
+): Promise<void> {
+  if (!quizId || orderedIds.length === 0) return;
+  quizRepository().reorderQuestions(quizId, orderedIds);
   revalidateEditor(quizId);
 }
 
