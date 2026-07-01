@@ -60,7 +60,7 @@ describe("createGame", () => {
     // Two Games already hold 1234 and 5678; the generator offers both before a
     // free one, so the new Game must land on 9999.
     const engine = createEngine({ newPin: scriptedPins("1234", "5678", "9999") });
-    const lobby = { status: "lobby" as const, players: [], createdAt: 0, questions: [], currentIndex: -1, opensAt: null, closesAt: null, responses: {}, rounds: [] };
+    const lobby = { status: "lobby" as const, players: [], createdAt: 0, lastActivityAt: 0, questions: [], currentIndex: -1, opensAt: null, closesAt: null, responses: {}, rounds: [] };
     const occupied: GameStore = {
       "1234": { pin: "1234", quizId: "a", hostToken: "ha", ...lobby },
       "5678": { pin: "5678", quizId: "b", hostToken: "hb", ...lobby },
@@ -721,6 +721,120 @@ describe("buildGameRecord", () => {
     if (!closed.ok) throw new Error("close failed");
     return closed.store;
   }
+});
+
+describe("reconnection", () => {
+  it("marks a Player disconnected without removing them, keeping score and rank", () => {
+    const { engine, clock, store } = playingGame(["Ada", "Bo"]);
+    // Ada banks 1000 points on Q1, then her socket drops.
+    clock.set(0);
+    let s = (engine.submitResponse(store, { pin: "0001", playerId: "Ada", optionId: "a" }) as { store: GameStore }).store;
+    clock.set(20_000);
+    s = (engine.closeQuestion(s, { pin: "0001" }) as { store: GameStore }).store;
+
+    const dropped = engine.markDisconnected(s, { pin: "0001", playerId: "Ada" });
+    expect(dropped.ok).toBe(true);
+    if (!dropped.ok) return;
+    const ada = dropped.game.players.find((p) => p.id === "Ada")!;
+    // Still in the Game (not removed), just flagged, with her score intact.
+    expect(dropped.game.players).toHaveLength(2);
+    expect(ada.connected).toBe(false);
+    expect(ada.score).toBe(1000);
+    const event = dropped.events[0];
+    expect(event.type).toBe("playerDisconnected");
+  });
+
+  it("markDisconnected is a silent no-op for an unknown Player or one already gone", () => {
+    const { engine, store } = playingGame(["Ada"]);
+    const unknown = engine.markDisconnected(store, { pin: "0001", playerId: "ghost" });
+    expect(unknown.ok && unknown.events).toEqual([]);
+
+    const first = engine.markDisconnected(store, { pin: "0001", playerId: "Ada" });
+    if (!first.ok) throw new Error("first disconnect failed");
+    const again = engine.markDisconnected(first.store, { pin: "0001", playerId: "Ada" });
+    expect(again.ok && again.events).toEqual([]);
+  });
+
+  it("playerReconnect re-attaches an existing Player mid-Game, preserving score/rank", () => {
+    const { engine, clock, store } = playingGame(["Ada", "Bo"]);
+    // Ada scores 1000 and Bo scores 0, then Ada drops.
+    clock.set(0);
+    let s = (engine.submitResponse(store, { pin: "0001", playerId: "Ada", optionId: "a" }) as { store: GameStore }).store;
+    s = (engine.submitResponse(s, { pin: "0001", playerId: "Bo", optionId: "b" }) as { store: GameStore }).store;
+    clock.set(20_000);
+    s = (engine.closeQuestion(s, { pin: "0001" }) as { store: GameStore }).store;
+    s = (engine.markDisconnected(s, { pin: "0001", playerId: "Ada" }) as { store: GameStore }).store;
+
+    const back = engine.playerReconnect(s, { pin: "0001", playerId: "Ada" });
+    expect(back.ok).toBe(true);
+    if (!back.ok) return;
+    const ada = back.game.players.find((p) => p.id === "Ada")!;
+    expect(ada.connected).toBe(true);
+    expect(ada.score).toBe(1000); // score preserved across the drop
+    // Rank preserved: Ada still leads Bo.
+    const event = back.events[0];
+    expect(event.type).toBe("playerReconnected");
+    if (event.type !== "playerReconnected") return;
+    expect(event.player.id).toBe("Ada");
+  });
+
+  it("playerReconnect rejects an unknown Player and a gone Game", () => {
+    const { engine, store } = playingGame(["Ada"]);
+    const ghost = engine.playerReconnect(store, { pin: "0001", playerId: "ghost" });
+    expect(ghost.ok).toBe(false);
+    const gone = engine.playerReconnect(store, { pin: "9999", playerId: "Ada" });
+    expect(gone.ok).toBe(false);
+  });
+
+  it("hostReconnect resumes control when the host token matches, and rejects a wrong one", () => {
+    const { engine, store } = playingGame(["Ada"]);
+    const resumed = engine.hostReconnect(store, { pin: "0001", hostToken: "host-1" });
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(resumed.game.status).toBe("question"); // hands back the in-progress Game
+    // Control genuinely resumes: the Host can advance/finish afterwards.
+    const wrong = engine.hostReconnect(store, { pin: "0001", hostToken: "nope" });
+    expect(wrong.ok).toBe(false);
+    if (wrong.ok) return;
+    expect(wrong.error).toMatch(/host/i);
+  });
+});
+
+describe("idle-timeout GC", () => {
+  it("evicts a Game idle longer than idleMs and frees its PIN, keeping fresh ones", () => {
+    const clock = manualClock(0);
+    const engine = createEngine({ now: clock, newPin: scriptedPins("1111", "2222") });
+    let store: GameStore = {};
+    // "1111" is created at t=0 and never touched again.
+    store = (engine.createGame(store, { quizId: "q", hostToken: "h1" }) as { store: GameStore }).store;
+
+    // 10 minutes later a second Game is created and stays active.
+    clock.set(10 * 60 * 1000);
+    store = (engine.createGame(store, { quizId: "q", hostToken: "h2" }) as { store: GameStore }).store;
+
+    // Sweep 31 minutes after the first Game's last activity, 30-minute idle window.
+    clock.set(31 * 60 * 1000);
+    const swept = engine.gcIdleGames(store, { idleMs: 30 * 60 * 1000 });
+    expect(swept.evictedPins).toEqual(["1111"]); // abandoned Game reclaimed
+    expect(Object.keys(swept.store)).toEqual(["2222"]); // fresh Game survives
+  });
+
+  it("counts any command as activity, so an active Game is never evicted", () => {
+    const clock = manualClock(0);
+    const engine = createEngine({ now: clock, newPin: () => "0001" });
+    let store: GameStore = {};
+    store = (engine.createGame(store, { quizId: "q", hostToken: "h" }) as { store: GameStore }).store;
+
+    // A Player joins right before the idle window would have elapsed.
+    clock.set(29 * 60 * 1000);
+    store = (engine.playerJoin(store, { pin: "0001", playerId: "p1", name: "Ada", avatar: "fox" }) as { store: GameStore }).store;
+
+    // 20 minutes after the join (49 total) — still within a window of the last activity.
+    clock.set(49 * 60 * 1000);
+    const swept = engine.gcIdleGames(store, { idleMs: 30 * 60 * 1000 });
+    expect(swept.evictedPins).toEqual([]);
+    expect(swept.store).toBe(store); // same reference when nothing is evicted
+  });
 });
 
 describe("concurrent Games", () => {

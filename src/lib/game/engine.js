@@ -68,6 +68,7 @@
  * @property {GameStatus} status
  * @property {Player[]} players
  * @property {number} createdAt  ms epoch from the injected now()
+ * @property {number} lastActivityAt  ms epoch of the last command that touched this Game, for the idle-timeout GC (#9)
  * @property {EngineQuestion[]} questions   the Quiz's Questions, set at startGame
  * @property {number} currentIndex          index of the live Question (-1 in lobby)
  * @property {number | null} opensAt         ms epoch Options become tappable
@@ -145,6 +146,8 @@
  * An event the adapter should emit over Socket.IO in response to a command.
  * @typedef {{ type: "gameCreated", pin: string }
  *   | { type: "playerJoined", pin: string, player: Player, players: Player[] }
+ *   | { type: "playerReconnected", pin: string, player: Player, players: Player[] }
+ *   | { type: "playerDisconnected", pin: string, player: Player, players: Player[] }
  *   | { type: "questionStarted", pin: string, index: number, question: EngineQuestion, opensAt: number, closesAt: number, playerCount: number }
  *   | { type: "responseRecorded", pin: string, playerId: string, answeredCount: number, connectedCount: number }
  *   | { type: "allAnswered", pin: string }
@@ -164,11 +167,15 @@
  * @typedef {Object} Engine
  * @property {(store: GameStore, cmd: { quizId: string, hostToken: string }) => CommandResult} createGame
  * @property {(store: GameStore, cmd: { pin: string, playerId: string, name: string, avatar: string }) => CommandResult} playerJoin
+ * @property {(store: GameStore, cmd: { pin: string, playerId: string }) => CommandResult} playerReconnect
+ * @property {(store: GameStore, cmd: { pin: string, hostToken: string }) => CommandResult} hostReconnect
+ * @property {(store: GameStore, cmd: { pin: string, playerId: string }) => CommandResult} markDisconnected
  * @property {(store: GameStore, cmd: { pin: string, hostToken: string, questions: EngineQuestion[], introMs?: number }) => CommandResult} startGame
  * @property {(store: GameStore, cmd: { pin: string, playerId: string, optionId: string }) => CommandResult} submitResponse
  * @property {(store: GameStore, cmd: { pin: string }) => CommandResult} closeQuestion
  * @property {(store: GameStore, cmd: { pin: string, hostToken: string }) => CommandResult} advance
  * @property {(store: GameStore, cmd: { pin: string, hostToken: string }) => CommandResult} finish
+ * @property {(store: GameStore, cmd: { idleMs: number }) => { store: GameStore, evictedPins: string[] }} gcIdleGames
  */
 
 /** Generate a random 4-digit Game PIN, e.g. "0042". */
@@ -186,6 +193,13 @@ const DEFAULT_INTRO_MS = 4000;
 // grace so a last tap still lands before the Reveal (PRD story 35). Owned by the
 // adapter's timers, but the constant lives with the engine so both agree.
 const GRACE_MS = 2000;
+
+// How long a Game may sit with no command touching it before the idle-timeout
+// GC reclaims it and frees its PIN (ADR-0002). Long enough that a real Game
+// between Questions is never mistaken for abandoned; short enough that a Host
+// who walked away doesn't hold a PIN forever. Owned conceptually by the engine
+// (gcIdleGames); the adapter runs the sweep on an interval.
+const IDLE_GC_MS = 30 * 60 * 1000;
 
 /** Clamp n into [min, max]. */
 function clamp(n, min, max) {
@@ -266,7 +280,8 @@ function createEngine(deps = {}) {
    */
   function beginQuestion(game, index, introMs) {
     const question = game.questions[index];
-    const opensAt = now() + (introMs ?? DEFAULT_INTRO_MS);
+    const startedAt = now();
+    const opensAt = startedAt + (introMs ?? DEFAULT_INTRO_MS);
     const closesAt = opensAt + question.timeLimitSec * 1000;
     /** @type {Game} */
     const next = {
@@ -276,6 +291,7 @@ function createEngine(deps = {}) {
       opensAt,
       closesAt,
       responses: {},
+      lastActivityAt: startedAt,
     };
     return {
       next,
@@ -300,6 +316,7 @@ function createEngine(deps = {}) {
      */
     createGame(store, { quizId, hostToken }) {
       const pin = allocatePin(store);
+      const at = now();
       /** @type {Game} */
       const game = {
         pin,
@@ -307,7 +324,8 @@ function createEngine(deps = {}) {
         hostToken,
         status: "lobby",
         players: [],
-        createdAt: now(),
+        createdAt: at,
+        lastActivityAt: at,
         questions: [],
         currentIndex: -1,
         opensAt: null,
@@ -351,7 +369,7 @@ function createEngine(deps = {}) {
         const players = game.players.map((p) =>
           p.id === playerId ? { ...p, connected: true } : p,
         );
-        const next = { ...game, players };
+        const next = { ...game, players, lastActivityAt: now() };
         return {
           ok: true,
           store: { ...store, [pin]: next },
@@ -367,22 +385,118 @@ function createEngine(deps = {}) {
         return { ok: false, error: `The name "${trimmedName}" is already taken in this Game.` };
       }
 
+      const joinedAt = now();
       /** @type {Player} */
       const player = {
         id: playerId,
         name: trimmedName,
         avatar,
         connected: true,
-        joinedAt: now(),
+        joinedAt,
         score: 0,
       };
       const players = [...game.players, player];
-      const next = { ...game, players };
+      const next = { ...game, players, lastActivityAt: joinedAt };
       return {
         ok: true,
         store: { ...store, [pin]: next },
         game: next,
         events: [{ type: "playerJoined", pin, player, players }],
+      };
+    },
+
+    /**
+     * A Player's client reconnects after a blip or a reload: re-attach the
+     * existing Player (keyed by their localStorage playerId, not the socket id)
+     * to their new socket, marking them connected again with score and rank
+     * intact. Works in any phase — unlike playerJoin, which only admits new
+     * Players in the Lobby. A gone Game or an unknown Player is rejected so the
+     * client can fall back to a fresh join.
+     * @param {GameStore} store
+     * @param {{ pin: string, playerId: string }} cmd
+     * @returns {CommandResult}
+     */
+    playerReconnect(store, { pin, playerId }) {
+      const game = store[pin];
+      if (!game) return { ok: false, error: "That Game is no longer active." };
+      const existing = game.players.find((p) => p.id === playerId);
+      if (!existing) {
+        return { ok: false, error: "We couldn't find your spot in this Game." };
+      }
+      const players = game.players.map((p) =>
+        p.id === playerId ? { ...p, connected: true } : p,
+      );
+      const next = { ...game, players, lastActivityAt: now() };
+      return {
+        ok: true,
+        store: { ...store, [pin]: next },
+        game: next,
+        events: [
+          {
+            type: "playerReconnected",
+            pin,
+            player: players.find((p) => p.id === playerId),
+            players,
+          },
+        ],
+      };
+    },
+
+    /**
+     * The Host's client reconnects and resumes control of the in-progress Game:
+     * the host token (minted at createGame, kept in the Host's localStorage) must
+     * match, so only the real Host resumes. Returns the live Game unchanged so
+     * the adapter can re-attach the socket to the room and re-send the current
+     * state. Touches activity so resuming keeps the Game off the idle GC.
+     * @param {GameStore} store
+     * @param {{ pin: string, hostToken: string }} cmd
+     * @returns {CommandResult}
+     */
+    hostReconnect(store, { pin, hostToken }) {
+      const game = store[pin];
+      if (!game) return { ok: false, error: "That Game is no longer active." };
+      if (game.hostToken !== hostToken) {
+        return { ok: false, error: "Only the Host can resume this Game." };
+      }
+      const next = { ...game, lastActivityAt: now() };
+      return { ok: true, store: { ...store, [pin]: next }, game: next, events: [] };
+    },
+
+    /**
+     * A Player's socket dropped: flag them disconnected without removing them,
+     * so the Host sees them greyed out (PRD story 48) and their score/rank wait
+     * for a reconnect. Deliberately does NOT touch lastActivityAt — a Game whose
+     * participants have all dropped should age toward the idle GC, not be kept
+     * alive by their leaving. A gone Game, an unknown Player, or one already
+     * flagged is a silent no-op (no event) so the adapter needn't special-case
+     * the reconnect/disconnect race.
+     * @param {GameStore} store
+     * @param {{ pin: string, playerId: string }} cmd
+     * @returns {CommandResult}
+     */
+    markDisconnected(store, { pin, playerId }) {
+      const game = store[pin];
+      if (!game) return { ok: false, error: "That Game is no longer active." };
+      const existing = game.players.find((p) => p.id === playerId);
+      if (!existing || !existing.connected) {
+        return { ok: true, store, game, events: [] };
+      }
+      const players = game.players.map((p) =>
+        p.id === playerId ? { ...p, connected: false } : p,
+      );
+      const next = { ...game, players };
+      return {
+        ok: true,
+        store: { ...store, [pin]: next },
+        game: next,
+        events: [
+          {
+            type: "playerDisconnected",
+            pin,
+            player: players.find((p) => p.id === playerId),
+            players,
+          },
+        ],
       };
     },
 
@@ -456,7 +570,7 @@ function createEngine(deps = {}) {
       /** @type {Response} */
       const response = { optionId, timeUsed, correct, points, at };
       const responses = { ...game.responses, [playerId]: response };
-      const next = { ...game, responses };
+      const next = { ...game, responses, lastActivityAt: at };
 
       const answeredCount = Object.keys(responses).length;
       const connectedCount = game.players.filter((p) => p.connected).length;
@@ -548,7 +662,7 @@ function createEngine(deps = {}) {
         }),
       };
 
-      const next = { ...game, status: "reveal", players, rounds: [...game.rounds, round] };
+      const next = { ...game, status: "reveal", players, rounds: [...game.rounds, round], lastActivityAt: now() };
       return {
         ok: true,
         store: { ...store, [pin]: next },
@@ -586,7 +700,7 @@ function createEngine(deps = {}) {
 
       if (game.status === "reveal") {
         const hasNext = game.currentIndex + 1 < game.questions.length;
-        const next = { ...game, status: "leaderboard" };
+        const next = { ...game, status: "leaderboard", lastActivityAt: now() };
         return {
           ok: true,
           store: { ...store, [pin]: next },
@@ -647,7 +761,7 @@ function createEngine(deps = {}) {
         return { ok: false, error: "The Game isn't ready to finish yet." };
       }
 
-      const next = { ...game, status: "podium" };
+      const next = { ...game, status: "podium", lastActivityAt: now() };
       return {
         ok: true,
         store: { ...store, [pin]: next },
@@ -655,7 +769,30 @@ function createEngine(deps = {}) {
         events: [{ type: "gameFinished", pin, standings: rankStandings(game.players) }],
       };
     },
+
+    /**
+     * Idle-timeout garbage collection (ADR-0002): evict every Game left idle
+     * longer than `idleMs` — an abandoned Game whose Host and Players have all
+     * drifted away — freeing its PIN for reuse. Runtime housekeeping rather than
+     * a domain command, so it returns just the pruned store and the evicted PINs
+     * (the adapter clears their timers). Returns the same store reference when
+     * nothing is evicted, so the adapter can cheaply skip a no-op sweep.
+     * @param {GameStore} store
+     * @param {{ idleMs: number }} cmd
+     * @returns {{ store: GameStore, evictedPins: string[] }}
+     */
+    gcIdleGames(store, { idleMs }) {
+      const cutoff = now() - idleMs;
+      const evictedPins = [];
+      /** @type {GameStore} */
+      const next = {};
+      for (const [pin, game] of Object.entries(store)) {
+        if (game.lastActivityAt <= cutoff) evictedPins.push(pin);
+        else next[pin] = game;
+      }
+      return { store: evictedPins.length ? next : store, evictedPins };
+    },
   };
 }
 
-module.exports = { createEngine, buildGameRecord, randomPin, DEFAULT_INTRO_MS, GRACE_MS };
+module.exports = { createEngine, buildGameRecord, rankStandings, randomPin, DEFAULT_INTRO_MS, GRACE_MS, IDLE_GC_MS };

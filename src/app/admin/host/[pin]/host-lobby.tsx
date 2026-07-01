@@ -12,6 +12,7 @@ import {
   type Podium,
   type QuestionBegin,
   type QuestionReveal,
+  type ResumeSnapshot,
   type Standing,
 } from "@/lib/game/socket-client";
 
@@ -58,14 +59,80 @@ export function HostGame({ pin, questions }: { pin: string; questions: Question[
   useEffect(() => {
     const socket = getSocket();
 
-    function attach() {
+    // Start the answering countdown once a Question's Options are live.
+    function startTick(answerMs: number) {
+      setPhase("open");
+      const deadline = Date.now() + answerMs;
+      setRemaining(Math.ceil(answerMs / 1000));
+      tick.current = setInterval(() => {
+        setRemaining(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+      }, 200);
+    }
+
+    // Show a Question's intro beat then its countdown — shared by the live
+    // question:begin event and a mid-Question resume (which passes the windows
+    // that remain, so a reload rejoins the same countdown rather than restarting
+    // the intro).
+    function beginQuestionUI(
+      q: PlayQuestion,
+      introMs: number,
+      answerMs: number,
+      totalCount: number,
+      answeredCount = 0,
+    ) {
+      if (introTimer.current) clearTimeout(introTimer.current);
+      if (tick.current) clearInterval(tick.current);
+      setReveal(null);
+      setLeaderboard(null);
+      setAnswered(answeredCount);
+      setTotal(totalCount);
+      setQuestion(q);
+      if (introMs > 0) {
+        setPhase("intro");
+        introTimer.current = setTimeout(() => startTick(answerMs), introMs);
+      } else {
+        startTick(answerMs);
+      }
+    }
+
+    // Resume whatever screen the Game is on after a (re)connect or a reload,
+    // proving ownership with the host token (#9).
+    function applyResume(snap: ResumeSnapshot) {
+      setPlayers(snap.players);
+      setStatus("live");
+      if (snap.status === "question" && snap.question) {
+        beginQuestionUI(
+          snap.question,
+          snap.introMs ?? 0,
+          snap.answerMs ?? 0,
+          snap.total ?? 0,
+          snap.answered ?? 0,
+        );
+      } else if (snap.status === "reveal" && snap.question && snap.reveal) {
+        if (introTimer.current) clearTimeout(introTimer.current);
+        if (tick.current) clearInterval(tick.current);
+        setQuestion(snap.question);
+        setReveal(snap.reveal);
+        setPhase("reveal");
+      } else if (snap.status === "leaderboard" && snap.leaderboard) {
+        setLeaderboard(snap.leaderboard);
+        setPhase("leaderboard");
+      } else if (snap.status === "podium" && snap.podium) {
+        setPodium(snap.podium);
+        setPhase("podium");
+      } else {
+        setPhase("lobby");
+      }
+    }
+
+    function reconnect() {
+      const hostToken = localStorage.getItem(`quiz:hostToken:${pin}`) ?? "";
       socket.emit(
-        "host:attach",
-        { pin },
-        (res: { ok: true; players: LobbyPlayer[] } | { ok: false; error: string }) => {
+        "host:reconnect",
+        { pin, hostToken },
+        (res: { ok: true; snapshot: ResumeSnapshot } | { ok: false; error: string }) => {
           if (!res.ok) return setStatus("gone");
-          setPlayers(res.players);
-          setStatus("live");
+          applyResume(res.snapshot);
         },
       );
     }
@@ -75,23 +142,7 @@ export function HostGame({ pin, questions }: { pin: string; questions: Question[
     }
 
     function onBegin(data: QuestionBegin) {
-      if (introTimer.current) clearTimeout(introTimer.current);
-      if (tick.current) clearInterval(tick.current);
-      setReveal(null);
-      setLeaderboard(null);
-      setAnswered(0);
-      setTotal(data.total);
-      setQuestion(data.question);
-      setPhase("intro");
-      // After the intro beat, Options become live and the countdown starts.
-      introTimer.current = setTimeout(() => {
-        setPhase("open");
-        const deadline = Date.now() + data.answerMs;
-        setRemaining(Math.ceil(data.answerMs / 1000));
-        tick.current = setInterval(() => {
-          setRemaining(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
-        }, 200);
-      }, data.introMs);
+      beginQuestionUI(data.question, data.introMs, data.answerMs, data.total);
     }
 
     function onProgress({ answered, total }: { answered: number; total: number }) {
@@ -116,8 +167,8 @@ export function HostGame({ pin, questions }: { pin: string; questions: Question[
       setPhase("podium");
     }
 
-    attach();
-    socket.on("connect", attach);
+    reconnect();
+    socket.on("connect", reconnect);
     socket.on("lobby:update", onLobbyUpdate);
     socket.on("question:begin", onBegin);
     socket.on("question:progress", onProgress);
@@ -125,7 +176,7 @@ export function HostGame({ pin, questions }: { pin: string; questions: Question[
     socket.on("game:leaderboard", onLeaderboard);
     socket.on("game:podium", onPodium);
     return () => {
-      socket.off("connect", attach);
+      socket.off("connect", reconnect);
       socket.off("lobby:update", onLobbyUpdate);
       socket.off("question:begin", onBegin);
       socket.off("question:progress", onProgress);

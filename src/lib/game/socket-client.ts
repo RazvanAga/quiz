@@ -90,9 +90,29 @@ export interface Podium {
   standings: Standing[];
 }
 
+// A snapshot of a Game's current phase, handed back on reconnect so a Host or
+// Player can resume mid-Game — not just in the Lobby — after a blip or a reload
+// (#9). Fields beyond status/players are present only for the matching phase.
+export interface ResumeSnapshot {
+  status: "lobby" | "question" | "reveal" | "leaderboard" | "podium";
+  players: LobbyPlayer[];
+  question?: PlayQuestion;
+  index?: number;
+  introMs?: number;
+  answerMs?: number;
+  answered?: number;
+  total?: number;
+  reveal?: QuestionReveal;
+  leaderboard?: LeaderboardUpdate;
+  podium?: Podium;
+  // Player-only: their locked-in Option and private outcome at the Reveal.
+  chosen?: string | null;
+  youResult?: YouResult;
+}
+
 // A stable per-browser Player identity (PRD "Identity & reconnection"): a UUID
 // kept in localStorage, so a reconnecting client re-attaches to the same Player
-// rather than the socket id. Reconnection itself lands in #9.
+// rather than the socket id (#9).
 export function getPlayerId(): string {
   const KEY = "quiz:playerId";
   let id = localStorage.getItem(KEY);
@@ -101,4 +121,17 @@ export function getPlayerId(): string {
     localStorage.setItem(KEY, id);
   }
   return id;
+}
+
+// The PIN of the Game this phone last joined, kept so a reload can re-attach to
+// the same in-progress Game (paired with the localStorage playerId).
+const PIN_KEY = "quiz:pin";
+export function rememberPin(pin: string): void {
+  localStorage.setItem(PIN_KEY, pin);
+}
+export function recallPin(): string | null {
+  return localStorage.getItem(PIN_KEY);
+}
+export function forgetPin(): void {
+  localStorage.removeItem(PIN_KEY);
 }

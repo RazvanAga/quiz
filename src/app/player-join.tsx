@@ -5,12 +5,16 @@ import { AVATARS, avatarGlyph } from "@/lib/game/avatars";
 import {
   getSocket,
   getPlayerId,
+  rememberPin,
+  recallPin,
+  forgetPin,
   type LeaderboardUpdate,
   type LobbyPlayer,
   type PlayQuestion,
   type Podium,
   type QuestionBegin,
   type QuestionReveal,
+  type ResumeSnapshot,
   type Standing,
   type YouResult,
 } from "@/lib/game/socket-client";
@@ -62,32 +66,108 @@ export function PlayerJoin() {
   const introTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tick = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Start the answering countdown once a Question's Options are tappable.
+  function startTick(answerMs: number) {
+    setPhase("open");
+    const deadline = Date.now() + answerMs;
+    setRemaining(Math.ceil(answerMs / 1000));
+    tick.current = setInterval(() => {
+      setRemaining(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+    }, 200);
+  }
+
+  // Play a Question's intro beat then its countdown — shared by the live
+  // question:begin event and a mid-Question resume (which passes the windows
+  // that remain, so a reload rejoins the same countdown).
+  function beginQuestionUI(q: PlayQuestion, introMs: number, answerMs: number) {
+    if (introTimer.current) clearTimeout(introTimer.current);
+    if (tick.current) clearInterval(tick.current);
+    setReveal(null);
+    setResult(null);
+    setChosen(null);
+    setQuestion(q);
+    if (introMs > 0) {
+      setPhase("intro");
+      introTimer.current = setTimeout(() => startTick(answerMs), introMs);
+    } else {
+      startTick(answerMs);
+    }
+  }
+
+  // Resume whatever screen the Game is on after a reload: re-attach to the same
+  // Player (score/rank intact) and repaint their phone mid-Game (PRD story 46).
+  function applyResume(snap: ResumeSnapshot, you?: { name: string; avatar: string }) {
+    setPlayers(snap.players);
+    if (you) {
+      setName(you.name);
+      setAvatar(you.avatar);
+    }
+    if (snap.status === "question" && snap.question) {
+      beginQuestionUI(snap.question, snap.introMs ?? 0, snap.answerMs ?? 0);
+    } else if (snap.status === "reveal" && snap.question && snap.reveal) {
+      if (introTimer.current) clearTimeout(introTimer.current);
+      if (tick.current) clearInterval(tick.current);
+      setQuestion(snap.question);
+      setReveal(snap.reveal);
+      setChosen(snap.chosen ?? null);
+      setResult(snap.youResult ?? null);
+      setPhase("reveal");
+    } else if (snap.status === "leaderboard" && snap.leaderboard) {
+      setLeaderboard(snap.leaderboard);
+      setPhase("leaderboard");
+    } else if (snap.status === "podium" && snap.podium) {
+      forgetPin();
+      setPodium(snap.podium);
+      setPhase("podium");
+    } else {
+      setPhase("lobby");
+    }
+  }
+
+  // On a fresh page load (a phone reload mid-Game), try to re-attach to the
+  // last Game this browser was in, keyed by the localStorage playerId + PIN. A
+  // stale PIN (the Game finished or was reclaimed) just falls back to the form.
+  useEffect(() => {
+    const storedPin = recallPin();
+    if (!storedPin) return;
+    getSocket().emit(
+      "player:reconnect",
+      { pin: storedPin, playerId: getPlayerId() },
+      (
+        res:
+          | { ok: true; you?: LobbyPlayer; snapshot: ResumeSnapshot }
+          | { ok: false; error: string },
+      ) => {
+        if (!res.ok) return forgetPin();
+        setPin(storedPin);
+        applyResume(res.snapshot, res.you);
+      },
+    );
+    // Runs once on mount; the helpers it calls close over stable setters/refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Once joined, listen for the roster and the Question lifecycle for the rest
   // of the Game (the listeners outlive each phase, so they attach just once).
   useEffect(() => {
     if (!joined) return;
     const socket = getSocket();
 
+    // A network blip drops then re-opens the socket without reloading the page,
+    // so React state is intact; we only need to re-attach to the room (and light
+    // back up in the roster). We deliberately don't apply the resume snapshot
+    // here, so an in-flight local phase (e.g. just-answered) isn't clobbered.
+    function rejoin() {
+      if (!pin) return;
+      socket.emit("player:reconnect", { pin, playerId: getPlayerId() }, () => {});
+    }
+
     function onLobbyUpdate({ players }: { players: LobbyPlayer[] }) {
       setPlayers(players);
     }
 
     function onBegin(data: QuestionBegin) {
-      if (introTimer.current) clearTimeout(introTimer.current);
-      if (tick.current) clearInterval(tick.current);
-      setReveal(null);
-      setResult(null);
-      setChosen(null);
-      setQuestion(data.question);
-      setPhase("intro");
-      introTimer.current = setTimeout(() => {
-        setPhase("open");
-        const deadline = Date.now() + data.answerMs;
-        setRemaining(Math.ceil(data.answerMs / 1000));
-        tick.current = setInterval(() => {
-          setRemaining(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
-        }, 200);
-      }, data.introMs);
+      beginQuestionUI(data.question, data.introMs, data.answerMs);
     }
 
     function onReveal(data: QuestionReveal) {
@@ -107,10 +187,14 @@ export function PlayerJoin() {
     }
 
     function onPodium(data: Podium) {
+      // The Game is over (and the server evicts it), so drop the stored PIN —
+      // a later visit lands on the join form, not a reconnect to a dead Game.
+      forgetPin();
       setPodium(data);
       setPhase("podium");
     }
 
+    socket.on("connect", rejoin);
     socket.on("lobby:update", onLobbyUpdate);
     socket.on("question:begin", onBegin);
     socket.on("question:reveal", onReveal);
@@ -118,6 +202,7 @@ export function PlayerJoin() {
     socket.on("game:leaderboard", onLeaderboard);
     socket.on("game:podium", onPodium);
     return () => {
+      socket.off("connect", rejoin);
       socket.off("lobby:update", onLobbyUpdate);
       socket.off("question:begin", onBegin);
       socket.off("question:reveal", onReveal);
@@ -127,6 +212,7 @@ export function PlayerJoin() {
       if (introTimer.current) clearTimeout(introTimer.current);
       if (tick.current) clearInterval(tick.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [joined]);
 
   function join(e: React.FormEvent) {
@@ -146,6 +232,8 @@ export function PlayerJoin() {
           setPhase("form");
           return;
         }
+        // Remember the PIN so a reload can re-attach to this Game (#9).
+        rememberPin(pin);
         setPlayers(res.players);
         setPhase("lobby");
       },
