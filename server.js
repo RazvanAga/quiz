@@ -8,9 +8,13 @@
 // Next Server Action (whose module scope is separate and can't hold live state
 // or push to clients). Real timers and the question lifecycle arrive in #6+.
 const { createServer } = require("node:http");
+const { mkdirSync } = require("node:fs");
+const path = require("node:path");
 const next = require("next");
 const { Server } = require("socket.io");
-const { createEngine, GRACE_MS } = require("./src/lib/game/engine.js");
+const Database = require("better-sqlite3");
+const { createEngine, buildGameRecord, GRACE_MS } = require("./src/lib/game/engine.js");
+const { createGameRecordRepository } = require("./src/lib/game-record-repository.js");
 
 const dev = process.env.NODE_ENV !== "production";
 const hostname = process.env.HOST || "0.0.0.0";
@@ -23,6 +27,16 @@ const engine = createEngine();
 // The live set of active Games, keyed by Game PIN. The engine treats this as
 // immutable input and returns the next store; we keep the latest reference.
 let store = {};
+
+// The adapter's own SQLite connection for persisting finished Games (ADR-0002).
+// Separate from Next's shared connection — different module systems, same WAL
+// file — which is safe under WAL. The repository ensures its own schema.
+const dataDir = path.join(process.cwd(), "data");
+mkdirSync(dataDir, { recursive: true });
+const recordDb = new Database(path.join(dataDir, "quiz.db"));
+recordDb.pragma("journal_mode = WAL");
+recordDb.pragma("foreign_keys = ON");
+const gameRecords = createGameRecordRepository(recordDb);
 
 app.prepare().then(() => {
   const httpServer = createServer((req, res) => handle(req, res));
@@ -242,8 +256,10 @@ app.prepare().then(() => {
     });
 
     // Host clicks "Finish" after the last Question: end the Game and show the
-    // final Podium (full ranking) to the whole room. State stays in memory;
-    // persisting the finished Game as a Game Record lands in #8.
+    // final Podium (full ranking) to the whole room. On the real finish (the
+    // idempotent second finish emits nothing) we write one Game Record with the
+    // Podium, Distributions, and per-Player per-Question detail, then evict the
+    // in-memory Game and free its PIN (ADR-0002).
     socket.on("host:finish", ({ pin, hostToken } = {}, ack) => {
       const result = engine.finish(store, {
         pin: String(pin || ""),
@@ -257,6 +273,18 @@ app.prepare().then(() => {
       for (const event of result.events) {
         if (event.type === "gameFinished") {
           io.to(room(event.pin)).emit("game:podium", { standings: event.standings });
+
+          try {
+            gameRecords.saveGameRecord(buildGameRecord(result.game));
+          } catch (err) {
+            // A failed write must not crash the server or the Podium; log and
+            // keep the finished Game in memory rather than evicting unpersisted.
+            console.error(`Failed to persist Game Record for PIN ${event.pin}`, err);
+            break;
+          }
+
+          const { [event.pin]: _evicted, ...rest } = store;
+          store = rest;
         }
       }
     });

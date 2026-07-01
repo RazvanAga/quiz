@@ -38,12 +38,20 @@ export default async function QuizEditorPage({
         <Link href="/admin" className="text-sm text-slate-400 hover:text-indigo-400">
           ← Quiz library
         </Link>
-        {quiz.questions.length > 0 && (
-          <StartGameButton
-            quizId={quiz.id}
-            className="rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
-          />
-        )}
+        <div className="flex items-center gap-3">
+          <Link
+            href={`/admin/quiz/${quiz.id}/history`}
+            className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800"
+          >
+            History
+          </Link>
+          {quiz.questions.length > 0 && (
+            <StartGameButton
+              quizId={quiz.id}
+              className="rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
+            />
+          )}
+        </div>
       </div>
 
       <form action={renameQuizAction} className="mb-8 mt-4 flex gap-3">

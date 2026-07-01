@@ -93,21 +93,27 @@ export function createQuizRepository(db: Database.Database): QuizRepository {
 
   return {
     listQuizzes(): QuizSummary[] {
-      // last-played comes from Game Records (added in #8); none exist yet, so
-      // it is always null for now.
+      // last-played is the most recent finished Game's date, or null if this
+      // Quiz has never been played to its Podium (Game Records, #8).
       const rows = db
         .prepare(
           `SELECT q.id, q.title,
-                  (SELECT COUNT(*) FROM question WHERE quiz_id = q.id) AS questionCount
+                  (SELECT COUNT(*) FROM question WHERE quiz_id = q.id) AS questionCount,
+                  (SELECT MAX(played_at) FROM game_record WHERE quiz_id = q.id) AS lastPlayedAt
            FROM quiz q
            ORDER BY q.updated_at DESC`,
         )
-        .all() as { id: string; title: string; questionCount: number }[];
+        .all() as {
+        id: string;
+        title: string;
+        questionCount: number;
+        lastPlayedAt: string | null;
+      }[];
       return rows.map((r) => ({
         id: r.id,
         title: r.title,
         questionCount: r.questionCount,
-        lastPlayedAt: null,
+        lastPlayedAt: r.lastPlayedAt,
       }));
     },
 

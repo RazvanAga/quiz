@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   createEngine,
+  buildGameRecord,
   type Engine,
   type EngineQuestion,
   type Game,
@@ -59,7 +60,7 @@ describe("createGame", () => {
     // Two Games already hold 1234 and 5678; the generator offers both before a
     // free one, so the new Game must land on 9999.
     const engine = createEngine({ newPin: scriptedPins("1234", "5678", "9999") });
-    const lobby = { status: "lobby" as const, players: [], createdAt: 0, questions: [], currentIndex: -1, opensAt: null, closesAt: null, responses: {} };
+    const lobby = { status: "lobby" as const, players: [], createdAt: 0, questions: [], currentIndex: -1, opensAt: null, closesAt: null, responses: {}, rounds: [] };
     const occupied: GameStore = {
       "1234": { pin: "1234", quizId: "a", hostToken: "ha", ...lobby },
       "5678": { pin: "5678", quizId: "b", hostToken: "hb", ...lobby },
@@ -647,6 +648,79 @@ describe("advance and finish", () => {
       { playerId: "Bo", name: "Bo", avatar: "fox", score: 500, rank: 2 },
     ]);
   });
+});
+
+describe("buildGameRecord", () => {
+  it("captures the Podium, per-Question Distribution and per-Player Responses", () => {
+    const { engine, clock, store } = playingGameWith([QUESTION, QUESTION_2], ["Ada", "Bo"]);
+
+    // Q1 (1000 pts): Ada right at open (1000), Bo wrong (0).
+    let s = revealFirstQuestionStandalone(engine, clock, store, { Ada: "a", Bo: "b" }, 20);
+    s = (engine.advance(s, { pin: "0001", hostToken: "host-1" }) as { store: GameStore }).store;
+    s = (engine.advance(s, { pin: "0001", hostToken: "host-1" }) as { store: GameStore }).store;
+
+    // Q2 (500 pts, 10s): Ada right at open (+500), Bo never answers.
+    clock.set(0);
+    s = (engine.submitResponse(s, { pin: "0001", playerId: "Ada", optionId: "t" }) as { store: GameStore }).store;
+    clock.set(10_000);
+    s = (engine.closeQuestion(s, { pin: "0001" }) as { store: GameStore }).store;
+
+    const fin = engine.finish(s, { pin: "0001", hostToken: "host-1" });
+    if (!fin.ok) throw new Error("finish failed");
+
+    const record = buildGameRecord(fin.game);
+    expect(record.quizId).toBe("q");
+    expect(record.pin).toBe("0001");
+    expect(record.playerCount).toBe(2);
+    expect(record.standings).toEqual([
+      { playerId: "Ada", name: "Ada", avatar: "fox", score: 1500, rank: 1 },
+      { playerId: "Bo", name: "Bo", avatar: "fox", score: 0, rank: 2 },
+    ]);
+
+    // One RoundRecord per closed Question, in order.
+    expect(record.rounds.map((r) => r.questionId)).toEqual(["q1", "q2"]);
+
+    const q1 = record.rounds[0];
+    expect(q1.distribution.counts).toEqual([
+      { optionId: "a", count: 1 },
+      { optionId: "b", count: 1 },
+      { optionId: "c", count: 0 },
+      { optionId: "d", count: 0 },
+    ]);
+    expect(q1.responses).toEqual([
+      { playerId: "Ada", optionId: "a", timeUsed: 0, correct: true, points: 1000 },
+      { playerId: "Bo", optionId: "b", timeUsed: 0, correct: false, points: 0 },
+    ]);
+
+    // Q2: Bo never answered — a null-Option, no-time Response, counted as noAnswer.
+    const q2 = record.rounds[1];
+    expect(q2.distribution.noAnswer).toBe(1);
+    const bo = q2.responses.find((r) => r.playerId === "Bo")!;
+    expect(bo.optionId).toBeNull();
+    expect(bo.timeUsed).toBeNull();
+    expect(bo.correct).toBe(false);
+  });
+
+  // Local copy of the reveal helper (the one above is scoped to its describe).
+  function revealFirstQuestionStandalone(
+    engine: Engine,
+    clock: ReturnType<typeof manualClock>,
+    store: GameStore,
+    answers: Record<string, string>,
+    limitSec: number,
+  ): GameStore {
+    let s = store;
+    clock.set(0);
+    for (const [playerId, optionId] of Object.entries(answers)) {
+      const r = engine.submitResponse(s, { pin: "0001", playerId, optionId });
+      if (!r.ok) throw new Error(`submit ${playerId} failed`);
+      s = r.store;
+    }
+    clock.set(limitSec * 1000);
+    const closed = engine.closeQuestion(s, { pin: "0001" });
+    if (!closed.ok) throw new Error("close failed");
+    return closed.store;
+  }
 });
 
 describe("concurrent Games", () => {

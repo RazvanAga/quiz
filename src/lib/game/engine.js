@@ -73,6 +73,37 @@
  * @property {number | null} opensAt         ms epoch Options become tappable
  * @property {number | null} closesAt        ms epoch the timer hits zero
  * @property {Object.<string, Response>} responses  by playerId, for the live Question
+ * @property {RoundRecord[]} rounds  one per closed Question, accumulated for the Game Record (#8)
+ */
+
+/**
+ * The frozen record of one closed Question, kept so the finished Game can be
+ * persisted with its full per-Question detail (docs/CONTEXT.md Game Record).
+ * The live Game discards each Question's Responses when it opens the next one,
+ * so closeQuestion snapshots them here as it reveals.
+ * @typedef {Object} RoundRecord
+ * @property {number} index
+ * @property {string} questionId
+ * @property {"single" | "truefalse"} type
+ * @property {string} text
+ * @property {{ id: string, text: string }[]} options
+ * @property {string} correctOptionId
+ * @property {number} points
+ * @property {number} timeLimitSec
+ * @property {Distribution} distribution
+ * @property {{ playerId: string, optionId: string | null, timeUsed: number | null, correct: boolean, points: number }[]} responses  one per Player who was in the Game
+ */
+
+/**
+ * A finished Game distilled into the shape the Game Record repository persists:
+ * its date comes from the DB, the Podium standings and every Question's
+ * Distribution and per-Player Responses come from here.
+ * @typedef {Object} GameRecordInput
+ * @property {string} quizId
+ * @property {string} pin
+ * @property {number} playerCount
+ * @property {Standing[]} standings   the final Podium
+ * @property {RoundRecord[]} rounds
  */
 
 /**
@@ -184,6 +215,24 @@ function rankStandings(players) {
 }
 
 /**
+ * Distill a finished Game into the Game Record the repository persists: its
+ * Podium standings plus every closed Question's Distribution and per-Player
+ * Responses (docs/CONTEXT.md). Pure — the adapter calls this on `gameFinished`
+ * and hands the result to the store, then evicts the in-memory Game (ADR-0002).
+ * @param {Game} game
+ * @returns {GameRecordInput}
+ */
+function buildGameRecord(game) {
+  return {
+    quizId: game.quizId,
+    pin: game.pin,
+    playerCount: game.players.length,
+    standings: rankStandings(game.players),
+    rounds: game.rounds,
+  };
+}
+
+/**
  * Create an engine bound to its injected dependencies.
  * @param {{ now?: () => number, newPin?: () => string }} [deps]
  */
@@ -264,6 +313,7 @@ function createEngine(deps = {}) {
         opensAt: null,
         closesAt: null,
         responses: {},
+        rounds: [],
       };
       return {
         ok: true,
@@ -471,7 +521,34 @@ function createEngine(deps = {}) {
         };
       });
 
-      const next = { ...game, status: "reveal", players };
+      // Snapshot this Question into the Game's history now, while its Responses
+      // are still in hand — opening the next Question clears them. The finished
+      // Game is persisted from these (buildGameRecord); an abandoned one, which
+      // never finishes, persists nothing (ADR-0002).
+      /** @type {RoundRecord} */
+      const round = {
+        index,
+        questionId: question.id,
+        type: question.type,
+        text: question.text,
+        options: question.options.map((o) => ({ id: o.id, text: o.text })),
+        correctOptionId: question.correctOptionId,
+        points: question.points,
+        timeLimitSec: question.timeLimitSec,
+        distribution,
+        responses: game.players.map((p) => {
+          const r = game.responses[p.id];
+          return {
+            playerId: p.id,
+            optionId: r ? r.optionId : null,
+            timeUsed: r ? r.timeUsed : null,
+            correct: r ? r.correct : false,
+            points: r ? r.points : 0,
+          };
+        }),
+      };
+
+      const next = { ...game, status: "reveal", players, rounds: [...game.rounds, round] };
       return {
         ok: true,
         store: { ...store, [pin]: next },
@@ -581,4 +658,4 @@ function createEngine(deps = {}) {
   };
 }
 
-module.exports = { createEngine, randomPin, DEFAULT_INTRO_MS, GRACE_MS };
+module.exports = { createEngine, buildGameRecord, randomPin, DEFAULT_INTRO_MS, GRACE_MS };

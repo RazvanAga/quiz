@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { GAME_RECORD_SCHEMA } from "./game-record-repository";
 
 // Persistence is a single SQLite file under data/, opened in WAL mode (ADR-0003).
 // data/ is gitignored and holds the DB (and, later, uploaded images).
@@ -40,13 +41,18 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_option_question ON option(question_id, position);
 `;
 
+// Game Record tables (finished-Game History) live with their repository so the
+// custom server can provision them over its own connection too (ADR-0002); the
+// shared connection ensures them here so listQuizzes' last-played query works.
+const FULL_SCHEMA = SCHEMA + GAME_RECORD_SCHEMA;
+
 // Opens a SQLite connection at `filename` (a path, or ":memory:" for tests),
 // enables WAL + foreign keys, and ensures the schema exists.
 export function openDatabase(filename: string): Database.Database {
   const db = new Database(filename);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
-  db.exec(SCHEMA);
+  db.exec(FULL_SCHEMA);
   return db;
 }
 
