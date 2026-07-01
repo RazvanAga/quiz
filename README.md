@@ -13,7 +13,7 @@ Players join from their phones, the host drives a shared screen, and everyone ra
 ![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-06B6D4?logo=tailwindcss&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
-> **Status: in active development.** The design is locked (see [docs/](docs/)); features are being built slice-by-slice in the [open issues](../../issues).
+> **Status: playable and deployable.** Built slice-by-slice from a locked design (see [docs/](docs/)); remaining polish is tracked in the [open issues](../../issues).
 
 </div>
 
@@ -74,19 +74,25 @@ Live game state lives in memory; the database is written only when a quiz is edi
 │   ├── PRD-01.md       Product spec
 │   ├── adr/            Architecture Decision Records
 │   └── issues/         Implementation slices (mirror of the GitHub issues)
-└── ...                 App code (added with issue #2, the walking skeleton)
+├── src/
+│   ├── app/            Next.js App Router (Player, /admin, /uploads routes)
+│   └── lib/            Game engine, Socket.IO adapter, SQLite repositories
+├── public/            Static assets
+├── scripts/           Dev/utility scripts
+├── server.js          Custom server: Next.js + Socket.IO on one port
+└── next.config.mjs
 ```
 
 ## Development
 
-> The app scaffold is the first build slice ([#2 — Walking skeleton](../../issues/2)). Once it lands:
-
 ```bash
 npm install
-npm run dev      # Next.js + Socket.IO on one port
+npm run dev      # Next.js + Socket.IO on one port (http://localhost:3000)
+npm test         # Vitest
+npm run build    # production build
 ```
 
-Data (the SQLite file and uploaded images) lives under `data/` and is gitignored — back it up by copying that folder.
+Data (the SQLite file and uploaded images) lives under `data/` and is gitignored — back it up by copying that folder. For production, see [Deployment](#deployment) below.
 
 ## Deployment
 
