@@ -1,1 +1,125 @@
 @import "tailwindcss";
+
+/* =========================================================================
+   Quiz — "Arcade Pop" design system
+   Dark stage · electric-lime chrome · four saturated answer colors with
+   distinct shapes (so the color-blind and the far-away can still tell them
+   apart). One theme, locked dark: the host screen lives on a TV in a dim
+   room, and the four answer colors only pop against ink.
+   ========================================================================= */
+
+@theme {
+  /* Type — wired to the next/font CSS variables set in layout.tsx. */
+  --font-sans: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-unbounded), var(--font-space-grotesk), sans-serif;
+
+  /* Ink — the dark stage. Not slate: a touch warmer/deeper so lime sings. */
+  --color-ink-950: #08080c;
+  --color-ink-900: #0f0f17;
+  --color-ink-850: #16161f;
+  --color-ink-800: #1c1c28;
+  --color-ink-700: #2a2a3a;
+  --color-ink-600: #3a3a4f;
+  --color-ink-500: #565672;
+  --color-ink-400: #7c7c9a;
+  --color-ink-300: #a6a6c0;
+  --color-ink-200: #cececf;
+  --color-ink-100: #ececf3;
+
+  /* Accent — Electric Lime. One accent, used for chrome everywhere: timers,
+     scores, primary CTAs, focus rings, "live" cues. Dark ink text on top. */
+  --color-lime-glow: #d7ff5e;
+  --color-lime: #c2f238;
+  --color-lime-deep: #9ac41f;
+
+  /* Four answer colors — each a bright "face" over a darker "chunk" edge, so
+     tiles read as pressable arcade buttons. Position 0..3. */
+  --color-ans-red: #f0335f;
+  --color-ans-red-deep: #a4123b;
+  --color-ans-blue: #2f93e6;
+  --color-ans-blue-deep: #165f9c;
+  --color-ans-gold: #f5a916;
+  --color-ans-gold-deep: #b06e02;
+  --color-ans-green: #1fc06e;
+  --color-ans-green-deep: #0d7c44;
+
+  /* Semantic */
+  --color-correct: #35d67f;
+  --color-wrong: #ff5470;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--color-ink-950);
+    /* A soft stage vignette + a faint lime spotlight up top for depth. */
+    background-image:
+      radial-gradient(120% 80% at 50% -10%, rgb(194 242 56 / 0.06), transparent 55%),
+      radial-gradient(100% 100% at 50% 120%, rgb(47 147 230 / 0.05), transparent 60%);
+    background-attachment: fixed;
+    color: var(--color-ink-100);
+  }
+
+  ::selection {
+    background: var(--color-lime);
+    color: var(--color-ink-950);
+  }
+
+  /* One consistent, on-brand focus ring — lime, offset from the ink stage. */
+  :focus-visible {
+    outline: 2px solid var(--color-lime);
+    outline-offset: 2px;
+  }
+
+  h1, h2, h3 {
+    text-wrap: balance;
+  }
+  p {
+    text-wrap: pretty;
+  }
+}
+
+@layer utilities {
+  /* Chunky arcade tile: a colored "face" sitting on a darker bottom edge that
+     compresses on :active, like a real button being pushed. */
+  .tile-shadow {
+    box-shadow: 0 6px 0 0 var(--tile-edge), 0 10px 24px -8px rgb(0 0 0 / 0.6);
+  }
+
+  .animate-float {
+    animation: float 6s ease-in-out infinite;
+  }
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-8px); }
+  }
+
+  /* Skeleton shimmer for loading/attaching states. */
+  .shimmer {
+    background: linear-gradient(
+      100deg,
+      var(--color-ink-850) 30%,
+      var(--color-ink-800) 50%,
+      var(--color-ink-850) 70%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+  @keyframes shimmer {
+    to { background-position: -200% 0; }
+  }
+}
+
+/* Everything above MOTION_INTENSITY 3 collapses to static under reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

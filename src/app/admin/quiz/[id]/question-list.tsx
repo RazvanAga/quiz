@@ -67,7 +67,7 @@ export function QuestionList({
             aria-label="Drag to reorder Question"
             onMouseDown={() => setGrabbedId(id)}
             onMouseUp={() => setGrabbedId(null)}
-            className="mt-5 flex h-8 w-6 shrink-0 cursor-grab items-center justify-center rounded text-slate-600 hover:bg-slate-800 hover:text-slate-300 active:cursor-grabbing"
+            className="mt-5 flex h-8 w-6 shrink-0 cursor-grab items-center justify-center rounded text-ink-500 hover:bg-ink-800 hover:text-ink-200 active:cursor-grabbing"
           >
             <svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor" aria-hidden>
               <circle cx="2" cy="3" r="1.5" />

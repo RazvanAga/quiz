@@ -1,7 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { AVATARS, avatarGlyph } from "@/lib/game/avatars";
+import { answerStyle, AnswerShape } from "@/lib/game/answer-style";
+import { Wordmark } from "./ui/brand";
+import { CountdownRing } from "./ui/countdown-ring";
 import {
   getSocket,
   getPlayerId,
@@ -26,15 +30,6 @@ import {
 // wrong/expired PIN, a taken name, or a Game that already started come back as a
 // clear message.
 
-// Option accents, matched to the Host screen so a Player can call out "the blue
-// one" across the room.
-const OPTION_ACCENTS = [
-  "bg-rose-600",
-  "bg-sky-600",
-  "bg-amber-500",
-  "bg-emerald-600",
-];
-
 type Phase =
   | "form"
   | "joining"
@@ -45,6 +40,8 @@ type Phase =
   | "reveal"
   | "leaderboard"
   | "podium";
+
+const SPRING = { type: "spring" as const, stiffness: 260, damping: 22 };
 
 export function PlayerJoin() {
   const [name, setName] = useState("");
@@ -57,6 +54,7 @@ export function PlayerJoin() {
   const [question, setQuestion] = useState<PlayQuestion | null>(null);
   const [chosen, setChosen] = useState<string | null>(null);
   const [remaining, setRemaining] = useState(0);
+  const [totalSecs, setTotalSecs] = useState(0);
   const [reveal, setReveal] = useState<QuestionReveal | null>(null);
   const [result, setResult] = useState<YouResult | null>(null);
   const [leaderboard, setLeaderboard] = useState<LeaderboardUpdate | null>(null);
@@ -70,7 +68,9 @@ export function PlayerJoin() {
   function startTick(answerMs: number) {
     setPhase("open");
     const deadline = Date.now() + answerMs;
-    setRemaining(Math.ceil(answerMs / 1000));
+    const secs = Math.ceil(answerMs / 1000);
+    setTotalSecs(secs);
+    setRemaining(secs);
     tick.current = setInterval(() => {
       setRemaining(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
     }, 200);
@@ -263,52 +263,67 @@ export function PlayerJoin() {
   // Playing a Question: intro beat, then tappable Options, then the Reveal.
   if (question && (phase === "intro" || phase === "open" || phase === "answered" || phase === "reveal")) {
     return (
-      <main className="mx-auto flex min-h-screen max-w-md flex-col px-5 py-8">
+      <main id="main" className="mx-auto flex min-h-[100dvh] max-w-md flex-col px-5 py-8">
         <div className="flex items-start justify-between gap-4">
-          <h1 className="text-xl font-black leading-snug">{question.text}</h1>
-          {phase === "open" && (
-            <span className="font-mono text-3xl font-black tabular-nums text-emerald-400">
-              {remaining}
-            </span>
-          )}
+          <h1 className="text-xl font-bold leading-snug text-ink-100">{question.text}</h1>
+          {phase === "open" && <CountdownRing remaining={remaining} total={totalSecs} size={58} stroke={5} />}
         </div>
 
         {question.imageUrl && (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={question.imageUrl} alt="" className="mx-auto mt-4 max-h-48 rounded-xl object-contain" />
+          <img
+            src={question.imageUrl}
+            alt="Question illustration"
+            className="mx-auto mt-4 max-h-48 rounded-2xl border border-ink-800 object-contain"
+          />
         )}
 
         {phase === "reveal" ? (
           <PlayerResult reveal={reveal!} chosen={chosen} result={result} question={question} />
         ) : phase === "intro" ? (
-          <p className="mt-16 text-center text-lg font-semibold text-slate-400">Get ready…</p>
+          <GetReady />
         ) : (
           <>
             <div className="mt-6 grid grid-cols-1 gap-3">
               {question.options.map((o, i) => {
                 const isChosen = chosen === o.id;
+                const style = answerStyle(i);
                 return (
-                  <button
+                  <motion.button
                     key={o.id}
                     type="button"
                     onClick={() => tap(o.id)}
                     disabled={phase !== "open"}
                     aria-pressed={isChosen}
-                    className={`flex items-center gap-4 rounded-2xl px-5 py-6 text-left text-white transition ${
-                      OPTION_ACCENTS[i % OPTION_ACCENTS.length]
-                    } ${phase === "answered" && !isChosen ? "opacity-40" : ""} ${
+                    initial={{ opacity: 0, y: 14 }}
+                    animate={{ opacity: phase === "answered" && !isChosen ? 0.35 : 1, y: 0 }}
+                    transition={{ delay: i * 0.05, ...SPRING }}
+                    whileTap={phase === "open" ? { scale: 0.97 } : undefined}
+                    style={{ "--tile-edge": style.edge } as React.CSSProperties}
+                    className={`tile-shadow flex items-center gap-4 rounded-2xl px-5 py-5 text-left text-white transition-[transform,box-shadow] active:translate-y-[3px] active:[box-shadow:0_3px_0_0_var(--tile-edge)] ${style.face} ${
                       isChosen ? "ring-4 ring-white" : ""
                     }`}
                   >
-                    <span className="text-lg font-black">{String.fromCharCode(65 + i)}</span>
+                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-black/20">
+                      <AnswerShape index={i} className="h-5 w-5 text-white" />
+                    </span>
                     <span className="flex-1 text-lg font-semibold">{o.text}</span>
-                  </button>
+                  </motion.button>
                 );
               })}
             </div>
-            {phase === "answered" && (
-              <p className="mt-6 text-center text-lg font-bold text-emerald-400">Locked in!</p>
-            )}
+            <AnimatePresence>
+              {phase === "answered" && (
+                <motion.p
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={SPRING}
+                  className="mt-6 text-center text-lg font-bold text-lime"
+                >
+                  Locked in!
+                </motion.p>
+              )}
+            </AnimatePresence>
           </>
         )}
       </main>
@@ -317,27 +332,48 @@ export function PlayerJoin() {
 
   if (phase === "lobby") {
     return (
-      <main className="mx-auto flex min-h-screen max-w-md flex-col items-center justify-center gap-6 px-6 py-12 text-center">
-        <span className="text-7xl" aria-hidden>
+      <main
+        id="main"
+        className="mx-auto flex min-h-[100dvh] max-w-md flex-col items-center justify-center gap-6 px-6 py-12 text-center"
+      >
+        <motion.span
+          className="animate-float text-7xl"
+          aria-hidden
+          initial={{ scale: 0, rotate: -12 }}
+          animate={{ scale: 1, rotate: 0 }}
+          transition={SPRING}
+        >
           {avatarGlyph(avatar)}
-        </span>
+        </motion.span>
         <div>
-          <h1 className="text-3xl font-black">You&apos;re in, {name.trim()}!</h1>
-          <p className="mt-2 text-slate-400">Hang tight — the Host will start the Game soon.</p>
+          <h1 className="font-display text-3xl font-bold text-ink-100">
+            You&apos;re in, {name.trim()}!
+          </h1>
+          <p className="mt-2 text-ink-400">Hang tight. The host starts the game soon.</p>
         </div>
-        <div className="w-full rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-          <p className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-400">
-            {players.length} {players.length === 1 ? "Player" : "Players"} in the Lobby
+        <div className="w-full rounded-2xl border border-ink-800 bg-ink-900/70 p-5">
+          <p className="mb-3 text-sm font-semibold uppercase tracking-wider text-lime">
+            {players.length} {players.length === 1 ? "player" : "players"} in the lobby
           </p>
           <ul className="flex flex-wrap justify-center gap-3">
-            {players.map((p) => (
-              <li key={p.id} className="flex flex-col items-center gap-1">
-                <span className="text-3xl" aria-hidden>
-                  {avatarGlyph(p.avatar)}
-                </span>
-                <span className="max-w-20 truncate text-xs text-slate-300">{p.name}</span>
-              </li>
-            ))}
+            <AnimatePresence mode="popLayout">
+              {players.map((p) => (
+                <motion.li
+                  key={p.id}
+                  layout
+                  initial={{ opacity: 0, scale: 0.5 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.5 }}
+                  transition={SPRING}
+                  className="flex flex-col items-center gap-1"
+                >
+                  <span className="text-3xl" aria-hidden>
+                    {avatarGlyph(p.avatar)}
+                  </span>
+                  <span className="max-w-20 truncate text-xs text-ink-300">{p.name}</span>
+                </motion.li>
+              ))}
+            </AnimatePresence>
           </ul>
         </div>
       </main>
@@ -345,15 +381,32 @@ export function PlayerJoin() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-8 px-6 py-12">
-      <header className="text-center">
-        <h1 className="text-4xl font-black tracking-tight">Join the Quiz</h1>
-        <p className="mt-2 text-slate-400">Pick a name and an Avatar, then enter the PIN.</p>
-      </header>
+    <main
+      id="main"
+      className="mx-auto flex min-h-[100dvh] max-w-md flex-col justify-center gap-8 px-6 py-12"
+    >
+      <motion.header
+        className="text-center"
+        initial={{ opacity: 0, y: -12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4 }}
+      >
+        <Wordmark className="mb-6" />
+        <h1 className="font-display text-4xl font-extrabold tracking-tight text-ink-100">
+          Join the game
+        </h1>
+        <p className="mt-2 text-ink-400">Pick a name and an avatar, then punch in the PIN.</p>
+      </motion.header>
 
-      <form onSubmit={join} className="space-y-6">
-        <div>
-          <label htmlFor="name" className="mb-2 block text-sm font-semibold text-slate-300">
+      <motion.form
+        onSubmit={join}
+        className="space-y-6"
+        initial="hidden"
+        animate="show"
+        variants={{ show: { transition: { staggerChildren: 0.07, delayChildren: 0.1 } } }}
+      >
+        <Field>
+          <label htmlFor="name" className="mb-2 block text-sm font-semibold text-ink-300">
             Display name
           </label>
           <input
@@ -363,34 +416,37 @@ export function PlayerJoin() {
             maxLength={20}
             required
             placeholder="e.g. Ada"
-            className="w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-lg text-slate-100 placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none"
+            className="w-full rounded-xl border border-ink-700 bg-ink-900 px-4 py-3 text-lg text-ink-100 placeholder:text-ink-500 focus:border-lime focus:outline-none"
           />
-        </div>
+        </Field>
 
-        <fieldset>
-          <legend className="mb-2 text-sm font-semibold text-slate-300">Avatar</legend>
-          <div className="grid grid-cols-6 gap-2">
-            {AVATARS.map((a) => (
-              <button
-                key={a.id}
-                type="button"
-                onClick={() => setAvatar(a.id)}
-                aria-label={a.label}
-                aria-pressed={avatar === a.id}
-                className={`flex aspect-square items-center justify-center rounded-xl border text-2xl transition ${
-                  avatar === a.id
-                    ? "border-indigo-500 bg-indigo-500/20"
-                    : "border-slate-800 bg-slate-900 hover:border-slate-600"
-                }`}
-              >
-                <span aria-hidden>{a.glyph}</span>
-              </button>
-            ))}
-          </div>
-        </fieldset>
+        <Field>
+          <fieldset>
+            <legend className="mb-2 text-sm font-semibold text-ink-300">Avatar</legend>
+            <div className="grid grid-cols-6 gap-2">
+              {AVATARS.map((a) => (
+                <motion.button
+                  key={a.id}
+                  type="button"
+                  onClick={() => setAvatar(a.id)}
+                  aria-label={a.label}
+                  aria-pressed={avatar === a.id}
+                  whileTap={{ scale: 0.9 }}
+                  className={`flex aspect-square items-center justify-center rounded-xl border text-2xl transition ${
+                    avatar === a.id
+                      ? "border-lime bg-lime/15"
+                      : "border-ink-800 bg-ink-900 hover:border-ink-600"
+                  }`}
+                >
+                  <span aria-hidden>{a.glyph}</span>
+                </motion.button>
+              ))}
+            </div>
+          </fieldset>
+        </Field>
 
-        <div>
-          <label htmlFor="pin" className="mb-2 block text-sm font-semibold text-slate-300">
+        <Field>
+          <label htmlFor="pin" className="mb-2 block text-sm font-semibold text-ink-300">
             Game PIN
           </label>
           <input
@@ -400,25 +456,60 @@ export function PlayerJoin() {
             inputMode="numeric"
             pattern="\d{4}"
             placeholder="0000"
-            className="w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-center font-mono text-3xl tracking-[0.4em] text-slate-100 placeholder:text-slate-600 focus:border-indigo-500 focus:outline-none"
+            className="w-full rounded-xl border border-ink-700 bg-ink-900 px-4 py-3 text-center font-display text-4xl font-bold tabular-nums tracking-[0.35em] text-lime placeholder:text-ink-700 focus:border-lime focus:outline-none"
           />
-        </div>
+        </Field>
 
-        {error && (
-          <p role="alert" className="rounded-lg border border-red-900/60 bg-red-950/40 px-4 py-3 text-sm text-red-300">
-            {error}
-          </p>
-        )}
+        <AnimatePresence>
+          {error && (
+            <motion.p
+              role="alert"
+              initial={{ opacity: 0, y: -6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              className="rounded-xl border border-wrong/40 bg-wrong/10 px-4 py-3 text-sm font-medium text-wrong"
+            >
+              {error}
+            </motion.p>
+          )}
+        </AnimatePresence>
 
-        <button
-          type="submit"
-          disabled={phase === "joining"}
-          className="w-full rounded-xl bg-indigo-600 px-6 py-3.5 text-lg font-bold text-white hover:bg-indigo-500 disabled:opacity-60"
-        >
-          {phase === "joining" ? "Joining…" : "Join Game"}
-        </button>
-      </form>
+        <Field>
+          <motion.button
+            type="submit"
+            disabled={phase === "joining"}
+            whileTap={{ scale: 0.98 }}
+            className="w-full rounded-full bg-lime px-6 py-4 text-lg font-bold text-ink-950 shadow-[0_6px_0_0_var(--color-lime-deep)] transition-[transform,box-shadow] active:translate-y-[3px] active:shadow-[0_3px_0_0_var(--color-lime-deep)] disabled:opacity-60"
+          >
+            {phase === "joining" ? "Joining…" : "Join game"}
+          </motion.button>
+        </Field>
+      </motion.form>
     </main>
+  );
+}
+
+// One entrance-staggered form row.
+function Field({ children }: { children: React.ReactNode }) {
+  return (
+    <motion.div variants={{ hidden: { opacity: 0, y: 12 }, show: { opacity: 1, y: 0 } }}>
+      {children}
+    </motion.div>
+  );
+}
+
+// The intro beat: a pulsing "Get ready" so the phone doesn't look frozen before
+// the Options light up.
+function GetReady() {
+  const reduce = useReducedMotion();
+  return (
+    <motion.p
+      className="mt-16 text-center font-display text-xl font-bold text-ink-300"
+      animate={reduce ? undefined : { opacity: [0.5, 1, 0.5] }}
+      transition={{ duration: 1.2, repeat: Infinity }}
+    >
+      Get ready…
+    </motion.p>
   );
 }
 
@@ -441,57 +532,65 @@ function PlacementScreen({
   const medal = me && me.rank <= 3 ? MEDALS[me.rank - 1] : null;
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-md flex-col items-center gap-6 px-6 py-10 text-center">
-      <p className="text-sm font-semibold uppercase tracking-[0.3em] text-emerald-400">
+    <main
+      id="main"
+      className="mx-auto flex min-h-[100dvh] max-w-md flex-col items-center gap-6 px-6 py-10 text-center"
+    >
+      <p className="text-sm font-semibold uppercase tracking-[0.3em] text-lime">
         {final ? "🏆 " : ""}
         {title}
       </p>
 
       {me ? (
-        <div className="flex flex-col items-center gap-2">
+        <motion.div
+          className="flex flex-col items-center gap-2"
+          initial={{ opacity: 0, scale: 0.7 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={SPRING}
+        >
           <span className="text-6xl" aria-hidden>
             {medal ?? avatarGlyph(me.avatar)}
           </span>
-          <p className="text-4xl font-black text-slate-100">
+          <p className="font-display text-4xl font-extrabold text-ink-100">
             {final ? "You finished" : "You're"} #{me.rank}
           </p>
-          <p className="text-lg font-semibold text-slate-400">
-            of {standings.length} · {me.score} points
+          <p className="text-lg font-semibold text-ink-400">
+            of {standings.length} · {me.score} pts
           </p>
-        </div>
+        </motion.div>
       ) : (
-        <p className="text-2xl font-bold text-slate-300">Standings</p>
+        <p className="text-2xl font-bold text-ink-300">Standings</p>
       )}
 
-      <ol className="mt-2 w-full flex flex-col gap-2">
-        {standings.map((s) => {
+      <ol className="mt-2 flex w-full flex-col gap-2">
+        {standings.map((s, i) => {
           const isMe = s.playerId === getPlayerId();
           const rowMedal = s.rank <= 3 ? MEDALS[s.rank - 1] : null;
           return (
-            <li
+            <motion.li
               key={s.playerId}
+              layout
+              initial={{ opacity: 0, x: -12 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: i * 0.04, ...SPRING }}
               className={`flex items-center gap-3 rounded-xl border px-4 py-2.5 text-left ${
-                isMe
-                  ? "border-indigo-500 bg-indigo-500/20"
-                  : "border-slate-800 bg-slate-900/60"
+                isMe ? "border-lime bg-lime/10" : "border-ink-800 bg-ink-900/60"
               }`}
             >
-              <span className="w-7 text-center text-lg font-black tabular-nums">
+              <span className="w-7 text-center text-lg font-bold tabular-nums text-ink-300">
                 {rowMedal ?? s.rank}
               </span>
               <span className="text-2xl" aria-hidden>
                 {avatarGlyph(s.avatar)}
               </span>
-              <span className="flex-1 truncate font-semibold text-slate-100">{s.name}</span>
-              <span className="font-mono font-bold tabular-nums text-emerald-400">{s.score}</span>
-            </li>
+              <span className="flex-1 truncate font-semibold text-ink-100">{s.name}</span>
+              <span className="font-display font-bold tabular-nums text-lime">{s.score}</span>
+            </motion.li>
           );
         })}
       </ol>
 
-      {!final && (
-        <p className="mt-2 text-sm text-slate-500">Hang tight — the Host will continue soon.</p>
-      )}
+      {!final && <p className="mt-2 text-sm text-ink-500">Hang tight. The host continues soon.</p>}
     </main>
   );
 }
@@ -513,30 +612,33 @@ function PlayerResult({
   const correctText = question.options.find((o) => o.id === reveal.correctOptionId)?.text;
 
   return (
-    <div className="mt-10 flex flex-col items-center gap-4 text-center">
+    <motion.div
+      className="mt-10 flex flex-col items-center gap-4 text-center"
+      initial={{ opacity: 0, scale: 0.85 }}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={SPRING}
+    >
       {chosen == null ? (
-        <p className="text-3xl font-black text-slate-300">Time&apos;s up!</p>
+        <p className="font-display text-3xl font-bold text-ink-300">Time&apos;s up!</p>
       ) : correct ? (
-        <p className="text-4xl font-black text-emerald-400">Correct! 🎉</p>
+        <p className="font-display text-4xl font-extrabold text-correct">Correct! 🎉</p>
       ) : (
-        <p className="text-4xl font-black text-rose-400">Wrong</p>
+        <p className="font-display text-4xl font-extrabold text-wrong">Wrong</p>
       )}
 
-      <p className="text-2xl font-bold text-slate-100">
-        +{result?.pointsGained ?? 0} points
-      </p>
+      <p className="text-2xl font-bold text-ink-100">+{result?.pointsGained ?? 0} pts</p>
 
       {!correct && (
-        <p className="text-slate-400">
-          The answer was <span className="font-semibold text-emerald-400">{correctText}</span>
+        <p className="text-ink-400">
+          The answer was <span className="font-semibold text-correct">{correctText}</span>
         </p>
       )}
 
       {result && (
-        <p className="mt-2 text-sm uppercase tracking-widest text-slate-500">
+        <p className="mt-2 text-sm uppercase tracking-widest text-ink-500">
           {result.totalScore} total
         </p>
       )}
-    </div>
+    </motion.div>
   );
 }
