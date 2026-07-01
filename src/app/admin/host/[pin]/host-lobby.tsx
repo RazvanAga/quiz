@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Question } from "@/lib/quiz-model";
 import { avatarGlyph } from "@/lib/game/avatars";
+import { useHostAudio } from "@/lib/game/host-audio";
 import {
   getSocket,
   type Distribution,
@@ -50,6 +51,20 @@ export function HostGame({ pin, questions }: { pin: string; questions: Question[
   const [leaderboard, setLeaderboard] = useState<LeaderboardUpdate | null>(null);
   const [podium, setPodium] = useState<Podium | null>(null);
   const [advancing, setAdvancing] = useState(false);
+
+  // Host-screen sound, with the mute preference remembered across reloads.
+  const [muted, setMuted] = useState(false);
+  useEffect(() => {
+    setMuted(localStorage.getItem("quiz:hostMuted") === "1");
+  }, []);
+  function toggleMuted() {
+    setMuted((m) => {
+      const next = !m;
+      localStorage.setItem("quiz:hostMuted", next ? "1" : "0");
+      return next;
+    });
+  }
+  useHostAudio(phase, muted);
 
   // Timers the intro beat and the countdown run on; cleared on teardown so a new
   // Question (or unmount) never leaves a stale tick behind.
@@ -216,6 +231,7 @@ export function HostGame({ pin, questions }: { pin: string; questions: Question[
     );
   }
 
+  function screen() {
   if (status === "gone") {
     return (
       <main className="flex min-h-screen flex-col items-center justify-center gap-4 px-6 text-center">
@@ -399,6 +415,30 @@ export function HostGame({ pin, questions }: { pin: string; questions: Question[
         </ul>
       )}
     </main>
+  );
+  }
+
+  return (
+    <>
+      {screen()}
+      <MuteToggle muted={muted} onToggle={toggleMuted} />
+    </>
+  );
+}
+
+// A fixed, always-on-screen control to silence (or restore) the Host audio.
+function MuteToggle({ muted, onToggle }: { muted: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-pressed={muted}
+      aria-label={muted ? "Unmute sound" : "Mute sound"}
+      title={muted ? "Unmute sound" : "Mute sound"}
+      className="fixed right-4 top-4 z-50 flex h-12 w-12 items-center justify-center rounded-full border border-slate-700 bg-slate-900/80 text-xl text-slate-200 shadow-lg backdrop-blur hover:bg-slate-800"
+    >
+      <span aria-hidden>{muted ? "🔇" : "🔊"}</span>
+    </button>
   );
 }
 

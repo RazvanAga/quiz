@@ -6,11 +6,11 @@ Add audio energy on the Host screen only. Play CC0-licensed lobby music while Pl
 
 ## Acceptance criteria
 
-- [ ] Lobby music, countdown tension, and Reveal sting play on the Host screen
-- [ ] A mute toggle on the Host screen
-- [ ] Player phones produce no audio
-- [ ] CC0 assets bundled with license/attribution documented
-- [ ] Finish with a commit describing what was achieved
+- [x] Lobby music, countdown tension, and Reveal sting play on the Host screen
+- [x] A mute toggle on the Host screen
+- [x] Player phones produce no audio
+- [x] CC0 assets bundled with license/attribution documented
+- [x] Finish with a commit describing what was achieved
 
 ## Blocked by
 
