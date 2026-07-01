@@ -90,7 +90,157 @@ Data (the SQLite file and uploaded images) lives under `data/` and is gitignored
 
 ## Deployment
 
-Designed to run as a single Node process behind nginx on a VPS, with HTTP Basic Auth gating `/admin`. Full deploy steps (process supervision, nginx reverse-proxy with WebSocket upgrade, the `/admin` auth gate, backups) are tracked in [#13](../../issues/13).
+The app runs as a **single Node process** behind **nginx** on a VPS (e.g. Hetzner). nginx terminates TLS, reverse-proxies HTTP + the WebSocket upgrade, and puts **HTTP Basic Auth on `/admin`** — the Player flow (`/`) stays open. See [ADR-0004](docs/adr/0004-nginx-basic-auth-admin.md) for why auth lives in the proxy, not the app.
+
+The steps below assume Ubuntu/Debian, the domain `quiz.domeniu.com`, and the app checked out at `/opt/quiz` running as user `quiz`.
+
+### 1. Prerequisites
+
+Install Node.js (18+) and the build tools `better-sqlite3` needs — it's a **native module**, so npm compiles it on install and the VPS needs a C/C++ toolchain and Python:
+
+```bash
+# Node 20 LTS (NodeSource) + build tools for better-sqlite3
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs build-essential python3
+```
+
+> If `npm install` fails on `better-sqlite3` with a `node-gyp` / compiler error, `build-essential` and `python3` are what's missing.
+
+### 2. Build and run the single process
+
+```bash
+git clone https://github.com/RazvanAga/quiz.git /opt/quiz
+cd /opt/quiz
+npm ci
+npm run build            # next build
+PORT=3000 npm start      # cross-env NODE_ENV=production node server.js
+```
+
+The server binds `PORT` (default `3000`, and `HOST`, default `0.0.0.0`). Next.js **and** Socket.IO are served by the same process on that one port. Data (SQLite + uploads) is written under `./data` relative to the working directory, so always start the process from the repo root.
+
+### 3. Supervise the process (systemd)
+
+Keep the process alive across crashes and reboots with a systemd unit. Create `/etc/systemd/system/quiz.service`:
+
+```ini
+[Unit]
+Description=Quiz (Next.js + Socket.IO, single process)
+After=network.target
+
+[Service]
+Type=simple
+User=quiz
+WorkingDirectory=/opt/quiz
+Environment=NODE_ENV=production
+Environment=PORT=3000
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now quiz
+sudo systemctl status quiz      # check it's running
+journalctl -u quiz -f           # follow logs
+```
+
+To deploy an update: `git pull && npm ci && npm run build && sudo systemctl restart quiz`.
+
+<details>
+<summary>Alternative: pm2</summary>
+
+If you prefer pm2 over systemd:
+
+```bash
+sudo npm install -g pm2
+cd /opt/quiz
+PORT=3000 pm2 start npm --name quiz -- start
+pm2 save
+pm2 startup            # prints a command to run so pm2 resurrects on boot
+```
+
+</details>
+
+### 4. nginx reverse proxy + WebSocket upgrade + `/admin` Basic Auth
+
+First create the htpasswd file that gates `/admin` (install `apache2-utils` for `htpasswd`):
+
+```bash
+sudo apt-get install -y apache2-utils
+sudo htpasswd -c /etc/nginx/quiz.htpasswd admin   # prompts for a password
+```
+
+Then the site config, `/etc/nginx/sites-available/quiz.domeniu.com`:
+
+```nginx
+server {
+    server_name quiz.domeniu.com;
+
+    # Player flow and everything else: open, proxied to the Node process.
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+
+        # WebSocket upgrade for Socket.IO (/socket.io/ rides through here too).
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;   # keep long-lived game sockets open
+    }
+
+    # Admin/authoring/history surface: gated by HTTP Basic Auth.
+    # The host screen (/admin/host/<pin>) is under /admin, so it's covered too.
+    location /admin {
+        auth_basic "Quiz Admin";
+        auth_basic_user_file /etc/nginx/quiz.htpasswd;
+
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+    }
+
+    listen 80;
+}
+```
+
+```bash
+sudo ln -s /etc/nginx/sites-available/quiz.domeniu.com /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Add HTTPS with Certbot (`sudo certbot --nginx -d quiz.domeniu.com`), which rewrites the `listen` block to 443 and adds a redirect. The `/admin` gate keeps working over TLS unchanged.
+
+> **The `/admin` protection lives entirely in this nginx config.** Running the Node process on a public port without the proxy — or dropping the `auth_basic` lines — exposes Quiz create/edit/delete and History to anyone (ADR-0004).
+
+### 5. Backups
+
+All state is two things under `./data`, both gitignored:
+
+- `data/quiz.db` (plus `quiz.db-wal` / `quiz.db-shm` in WAL mode) — the SQLite database
+- `data/uploads/` — uploaded Question images
+
+Back up by **copying the whole `data/` folder**. A simple nightly cron is enough:
+
+```bash
+# copy data/ to a timestamped tarball; keep it off-box for real safety
+tar czf /backups/quiz-$(date +\%F).tar.gz -C /opt/quiz data
+```
+
+Copying while the app runs is safe under WAL (SQLite keeps the main file consistent), but for a guaranteed-clean snapshot you can `sudo systemctl stop quiz`, copy, then start it again. Restore by putting the `data/` folder back before starting the process.
 
 ## Documentation
 
