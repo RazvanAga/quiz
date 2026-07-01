@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { createEngine, type Engine, type Game, type GameStore } from "./engine";
+import {
+  createEngine,
+  type Engine,
+  type EngineQuestion,
+  type Game,
+  type GameStore,
+} from "./engine";
 
 // Seam 1: the pure, transport-free Game engine. Commands in -> next state +
 // events out, with an injected now() clock (and an injectable PIN generator so
@@ -53,9 +59,10 @@ describe("createGame", () => {
     // Two Games already hold 1234 and 5678; the generator offers both before a
     // free one, so the new Game must land on 9999.
     const engine = createEngine({ newPin: scriptedPins("1234", "5678", "9999") });
+    const lobby = { status: "lobby" as const, players: [], createdAt: 0, questions: [], currentIndex: -1, opensAt: null, closesAt: null, responses: {} };
     const occupied: GameStore = {
-      "1234": { pin: "1234", quizId: "a", hostToken: "ha", status: "lobby", players: [], createdAt: 0 },
-      "5678": { pin: "5678", quizId: "b", hostToken: "hb", status: "lobby", players: [], createdAt: 0 },
+      "1234": { pin: "1234", quizId: "a", hostToken: "ha", ...lobby },
+      "5678": { pin: "5678", quizId: "b", hostToken: "hb", ...lobby },
     };
 
     const result = engine.createGame(occupied, { quizId: "c", hostToken: "hc" });
@@ -93,7 +100,7 @@ describe("playerJoin", () => {
     if (!result.ok) return;
     // createGame consumed the first tick (createdAt 1000), so this join sees 2000.
     expect(result.game.players).toEqual([
-      { id: "p1", name: "Ada", avatar: "fox", connected: true, joinedAt: 2000 },
+      { id: "p1", name: "Ada", avatar: "fox", connected: true, joinedAt: 2000, score: 0 },
     ]);
     const joined = result.events[0];
     expect(joined.type).toBe("playerJoined");
@@ -163,6 +170,261 @@ describe("playerJoin", () => {
   it("does not mutate the input store", () => {
     engine.playerJoin(store, { pin: game.pin, playerId: "p1", name: "Ada", avatar: "fox" });
     expect(store[game.pin].players).toEqual([]);
+  });
+});
+
+// A clock the test drives by hand, so scoring windows are exact rather than
+// merely distinct. now() returns the current value; set()/advance() move it.
+function manualClock(start = 0) {
+  let t = start;
+  const fn = () => t;
+  fn.set = (v: number) => {
+    t = v;
+  };
+  fn.advance = (d: number) => {
+    t += d;
+  };
+  return fn;
+}
+
+// A single-choice Question: 20s limit, 1000 points, "a" correct.
+const QUESTION: EngineQuestion = {
+  id: "q1",
+  type: "single",
+  text: "2 + 2 = ?",
+  imageUrl: null,
+  options: [
+    { id: "a", text: "4" },
+    { id: "b", text: "5" },
+    { id: "c", text: "6" },
+    { id: "d", text: "7" },
+  ],
+  correctOptionId: "a",
+  timeLimitSec: 20,
+  points: 1000,
+};
+
+// Build a Game already started on QUESTION, with the given Players joined, its
+// intro beat skipped (introMs 0 so opensAt === now at start) and the clock left
+// at opensAt. Returns everything a play test needs.
+function playingGame(names: string[]) {
+  const clock = manualClock(0);
+  const engine = createEngine({ now: clock, newPin: () => "0001" });
+  let store: GameStore = {};
+
+  const created = engine.createGame(store, { quizId: "q", hostToken: "host-1" });
+  if (!created.ok) throw new Error("createGame failed");
+  store = created.store;
+
+  for (const name of names) {
+    const joined = engine.playerJoin(store, {
+      pin: "0001",
+      playerId: name,
+      name,
+      avatar: "fox",
+    });
+    if (!joined.ok) throw new Error(`join ${name} failed`);
+    store = joined.store;
+  }
+
+  const started = engine.startGame(store, {
+    pin: "0001",
+    hostToken: "host-1",
+    questions: [QUESTION],
+    introMs: 0,
+  });
+  if (!started.ok) throw new Error("startGame failed");
+  store = started.store;
+
+  return { engine, clock, store, started };
+}
+
+describe("startGame", () => {
+  it("opens the first Question with intro then answer windows and stops joins", () => {
+    const { started } = playingGame(["Ada"]);
+    expect(started.game.status).toBe("question");
+    expect(started.game.currentIndex).toBe(0);
+    // introMs 0 → Options tappable immediately; 20s limit → closes at 20000.
+    expect(started.game.opensAt).toBe(0);
+    expect(started.game.closesAt).toBe(20_000);
+
+    const event = started.events[0];
+    expect(event.type).toBe("questionStarted");
+    if (event.type !== "questionStarted") return;
+    expect(event.question.id).toBe("q1");
+    expect(event.playerCount).toBe(1);
+  });
+
+  it("honours the intro beat when computing opensAt/closesAt", () => {
+    const clock = manualClock(1000);
+    const engine = createEngine({ now: clock, newPin: () => "0001" });
+    const created = engine.createGame({}, { quizId: "q", hostToken: "h" });
+    if (!created.ok) throw new Error("setup failed");
+    const started = engine.startGame(created.store, {
+      pin: "0001",
+      hostToken: "h",
+      questions: [QUESTION],
+      introMs: 4000,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    expect(started.game.opensAt).toBe(5000); // 1000 + 4000 intro
+    expect(started.game.closesAt).toBe(25_000); // opensAt + 20s
+  });
+
+  it("rejects a start from anyone but the Host", () => {
+    const clock = manualClock(0);
+    const engine = createEngine({ now: clock, newPin: () => "0001" });
+    const created = engine.createGame({}, { quizId: "q", hostToken: "host-1" });
+    if (!created.ok) throw new Error("setup failed");
+    const started = engine.startGame(created.store, {
+      pin: "0001",
+      hostToken: "someone-else",
+      questions: [QUESTION],
+    });
+    expect(started.ok).toBe(false);
+    if (started.ok) return;
+    expect(started.error).toMatch(/host/i);
+  });
+
+  it("rejects a Quiz with no Questions", () => {
+    const clock = manualClock(0);
+    const engine = createEngine({ now: clock, newPin: () => "0001" });
+    const created = engine.createGame({}, { quizId: "q", hostToken: "h" });
+    if (!created.ok) throw new Error("setup failed");
+    const started = engine.startGame(created.store, {
+      pin: "0001",
+      hostToken: "h",
+      questions: [],
+    });
+    expect(started.ok).toBe(false);
+  });
+
+  it("rejects a Player joining after Start (no late join)", () => {
+    const { engine, store } = playingGame(["Ada"]);
+    const late = engine.playerJoin(store, {
+      pin: "0001",
+      playerId: "late",
+      name: "Zoe",
+      avatar: "owl",
+    });
+    expect(late.ok).toBe(false);
+    if (late.ok) return;
+    expect(late.error).toMatch(/already started/i);
+  });
+});
+
+describe("submitResponse scoring", () => {
+  it("scores a correct Response time-scaled: full at open, ~three-quarters, half at the buzzer", () => {
+    const { engine, clock, store } = playingGame(["fast", "mid", "slow"]);
+    let s = store;
+
+    // fast answers the instant Options open → full points.
+    clock.set(0);
+    const r1 = engine.submitResponse(s, { pin: "0001", playerId: "fast", optionId: "a" });
+    if (!r1.ok) throw new Error("r1");
+    s = r1.store;
+
+    // mid answers at the 10s mark of a 20s limit → 1 - 0.25 = 0.75.
+    clock.set(10_000);
+    const r2 = engine.submitResponse(s, { pin: "0001", playerId: "mid", optionId: "a" });
+    if (!r2.ok) throw new Error("r2");
+    s = r2.store;
+
+    // slow answers right at the buzzer → half points.
+    clock.set(20_000);
+    const r3 = engine.submitResponse(s, { pin: "0001", playerId: "slow", optionId: "a" });
+    if (!r3.ok) throw new Error("r3");
+    s = r3.store;
+
+    expect(s["0001"].responses.fast.points).toBe(1000);
+    expect(s["0001"].responses.mid.points).toBe(750);
+    expect(s["0001"].responses.slow.points).toBe(500);
+  });
+
+  it("scores a wrong Response zero", () => {
+    const { engine, clock, store } = playingGame(["Ada"]);
+    clock.set(0);
+    const r = engine.submitResponse(store, { pin: "0001", playerId: "Ada", optionId: "b" });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.game.responses.Ada.correct).toBe(false);
+    expect(r.game.responses.Ada.points).toBe(0);
+  });
+
+  it("locks the first Response and rejects a second tap", () => {
+    const { engine, store } = playingGame(["Ada"]);
+    const first = engine.submitResponse(store, { pin: "0001", playerId: "Ada", optionId: "a" });
+    if (!first.ok) throw new Error("first");
+    const second = engine.submitResponse(first.store, {
+      pin: "0001",
+      playerId: "Ada",
+      optionId: "b",
+    });
+    expect(second.ok).toBe(false);
+    if (second.ok) return;
+    expect(second.error).toMatch(/already answered/i);
+  });
+
+  it("emits allAnswered only once every connected Player has answered", () => {
+    const { engine, store } = playingGame(["Ada", "Bo"]);
+    const first = engine.submitResponse(store, { pin: "0001", playerId: "Ada", optionId: "a" });
+    if (!first.ok) throw new Error("first");
+    expect(first.events.some((e) => e.type === "allAnswered")).toBe(false);
+
+    const second = engine.submitResponse(first.store, {
+      pin: "0001",
+      playerId: "Bo",
+      optionId: "b",
+    });
+    if (!second.ok) throw new Error("second");
+    expect(second.events.some((e) => e.type === "allAnswered")).toBe(true);
+  });
+});
+
+describe("closeQuestion", () => {
+  it("close-on-timeout reveals the answer, banks scores, and tallies the Distribution", () => {
+    const { engine, clock, store } = playingGame(["fast", "wrong", "silent"]);
+    let s = store;
+    clock.set(0);
+    s = (engine.submitResponse(s, { pin: "0001", playerId: "fast", optionId: "a" }) as any).store;
+    s = (engine.submitResponse(s, { pin: "0001", playerId: "wrong", optionId: "b" }) as any).store;
+    // "silent" never answers; the Question closes on timeout.
+    clock.set(20_000);
+
+    const closed = engine.closeQuestion(s, { pin: "0001" });
+    expect(closed.ok).toBe(true);
+    if (!closed.ok) return;
+    expect(closed.game.status).toBe("reveal");
+
+    const event = closed.events[0];
+    expect(event.type).toBe("questionClosed");
+    if (event.type !== "questionClosed") return;
+    expect(event.correctOptionId).toBe("a");
+    // Distribution: one for "a", one for "b", none elsewhere; one unanswered.
+    expect(event.distribution.counts).toEqual([
+      { optionId: "a", count: 1 },
+      { optionId: "b", count: 1 },
+      { optionId: "c", count: 0 },
+      { optionId: "d", count: 0 },
+    ]);
+    expect(event.distribution.noAnswer).toBe(1);
+
+    // Only the correct Player banked points; the silent Player earns zero.
+    const byId = Object.fromEntries(closed.game.players.map((p) => [p.id, p.score]));
+    expect(byId.fast).toBe(1000);
+    expect(byId.wrong).toBe(0);
+    expect(byId.silent).toBe(0);
+  });
+
+  it("is idempotent so racing timers (timeout vs all-answered grace) can't double-close", () => {
+    const { engine, store } = playingGame(["Ada"]);
+    const first = engine.closeQuestion(store, { pin: "0001" });
+    if (!first.ok) throw new Error("first");
+    const second = engine.closeQuestion(first.store, { pin: "0001" });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.events).toEqual([]);
   });
 });
 

@@ -34,7 +34,8 @@ export function StartGameButton({
           return;
         }
         localStorage.setItem(`quiz:hostToken:${res.pin}`, hostToken);
-        router.push(`/admin/host/${res.pin}`);
+        // Carry the Quiz id so the Host page can load its Questions to play.
+        router.push(`/admin/host/${res.pin}?quizId=${quizId}`);
       },
     );
   }

@@ -18,12 +18,42 @@
  * @property {string} avatar     chosen preset Avatar id
  * @property {boolean} connected
  * @property {number} joinedAt   ms epoch from the injected now()
+ * @property {number} score      running total across answered Questions
  */
 
 /**
- * The Game lifecycle (PRD state machine). #5 implements only the lobby; the
- * remaining phases (question_intro, question_open, ...) land in #6+.
- * @typedef {"lobby"} GameStatus
+ * The Game lifecycle (PRD state machine). #5 built the lobby; #6 adds one
+ * Question end-to-end: `question` covers the intro beat and the open answering
+ * window (options become tappable at `opensAt`), then `reveal` shows the correct
+ * Option and the Distribution. Leaderboard/Podium/advance land in #7.
+ * @typedef {"lobby" | "question" | "reveal"} GameStatus
+ */
+
+/**
+ * A Question as the engine plays it — the authored shape (docs/CONTEXT.md) the
+ * adapter passes in at startGame, correct Option and all. The adapter strips
+ * `correctOptionId` before anything reaches a Player's phone.
+ * @typedef {Object} EngineQuestion
+ * @property {string} id
+ * @property {"single" | "truefalse"} type
+ * @property {string} text
+ * @property {string | null} imageUrl
+ * @property {{ id: string, text: string }[]} options
+ * @property {string} correctOptionId
+ * @property {number} timeLimitSec
+ * @property {number} points
+ */
+
+/**
+ * One Player's Response to the current Question (docs/CONTEXT.md): the Option
+ * picked, how long they took from `opensAt`, whether it was correct, and the
+ * time-scaled points earned. Runtime only.
+ * @typedef {Object} Response
+ * @property {string} optionId
+ * @property {number} timeUsed  ms from opensAt to the tap, clamped to [0, limit]
+ * @property {boolean} correct
+ * @property {number} points
+ * @property {number} at        ms epoch of the tap
  */
 
 /**
@@ -35,6 +65,11 @@
  * @property {GameStatus} status
  * @property {Player[]} players
  * @property {number} createdAt  ms epoch from the injected now()
+ * @property {EngineQuestion[]} questions   the Quiz's Questions, set at startGame
+ * @property {number} currentIndex          index of the live Question (-1 in lobby)
+ * @property {number | null} opensAt         ms epoch Options become tappable
+ * @property {number | null} closesAt        ms epoch the timer hits zero
+ * @property {Object.<string, Response>} responses  by playerId, for the live Question
  */
 
 /**
@@ -44,9 +79,30 @@
  */
 
 /**
+ * The Distribution of Responses across a Question's Options (docs/CONTEXT.md),
+ * in Option order, plus how many Players never answered.
+ * @typedef {{ counts: { optionId: string, count: number }[], noAnswer: number }} Distribution
+ */
+
+/**
+ * One Player's outcome for the closed Question, as the Reveal reports it.
+ * @typedef {Object} QuestionResult
+ * @property {string} playerId
+ * @property {string | null} optionId    the Option picked, or null if unanswered
+ * @property {boolean} correct
+ * @property {number} points              points gained this Question
+ * @property {number | null} timeUsed
+ * @property {number} totalScore          running total after this Question
+ */
+
+/**
  * An event the adapter should emit over Socket.IO in response to a command.
  * @typedef {{ type: "gameCreated", pin: string }
- *   | { type: "playerJoined", pin: string, player: Player, players: Player[] }} GameEvent
+ *   | { type: "playerJoined", pin: string, player: Player, players: Player[] }
+ *   | { type: "questionStarted", pin: string, index: number, question: EngineQuestion, opensAt: number, closesAt: number, playerCount: number }
+ *   | { type: "responseRecorded", pin: string, playerId: string, answeredCount: number, connectedCount: number }
+ *   | { type: "allAnswered", pin: string }
+ *   | { type: "questionClosed", pin: string, index: number, correctOptionId: string, distribution: Distribution, results: QuestionResult[], players: Player[] }} GameEvent
  */
 
 /**
@@ -60,6 +116,9 @@
  * @typedef {Object} Engine
  * @property {(store: GameStore, cmd: { quizId: string, hostToken: string }) => CommandResult} createGame
  * @property {(store: GameStore, cmd: { pin: string, playerId: string, name: string, avatar: string }) => CommandResult} playerJoin
+ * @property {(store: GameStore, cmd: { pin: string, hostToken: string, questions: EngineQuestion[], introMs?: number }) => CommandResult} startGame
+ * @property {(store: GameStore, cmd: { pin: string, playerId: string, optionId: string }) => CommandResult} submitResponse
+ * @property {(store: GameStore, cmd: { pin: string }) => CommandResult} closeQuestion
  */
 
 /** Generate a random 4-digit Game PIN, e.g. "0042". */
@@ -68,6 +127,20 @@ function randomPin() {
 }
 
 const TOTAL_PINS = 10000;
+
+// The intro beat: how long a Question's text (and image) show before its Options
+// become tappable (PRD story 29). The answering countdown starts at opensAt.
+const DEFAULT_INTRO_MS = 4000;
+
+// Once every connected Player has answered, the Question stays open a short
+// grace so a last tap still lands before the Reveal (PRD story 35). Owned by the
+// adapter's timers, but the constant lives with the engine so both agree.
+const GRACE_MS = 2000;
+
+/** Clamp n into [min, max]. */
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
 
 /**
  * Create an engine bound to its injected dependencies.
@@ -108,6 +181,11 @@ function createEngine(deps = {}) {
         status: "lobby",
         players: [],
         createdAt: now(),
+        questions: [],
+        currentIndex: -1,
+        opensAt: null,
+        closesAt: null,
+        responses: {},
       };
       return {
         ok: true,
@@ -168,6 +246,7 @@ function createEngine(deps = {}) {
         avatar,
         connected: true,
         joinedAt: now(),
+        score: 0,
       };
       const players = [...game.players, player];
       const next = { ...game, players };
@@ -178,7 +257,183 @@ function createEngine(deps = {}) {
         events: [{ type: "playerJoined", pin, player, players }],
       };
     },
+
+    /**
+     * The Host starts the Questions: no more joins, and the first Question opens
+     * with its intro beat. `opensAt`/`closesAt` are absolute timestamps off the
+     * injected clock, so the adapter schedules the countdown and the engine
+     * scores taps against the same reference. The hostToken must match the one
+     * from createGame, so only the Host can start.
+     * @param {GameStore} store
+     * @param {{ pin: string, hostToken: string, questions: EngineQuestion[], introMs?: number }} cmd
+     * @returns {CommandResult}
+     */
+    startGame(store, { pin, hostToken, questions, introMs }) {
+      const game = store[pin];
+      if (!game) return { ok: false, error: "That Game is no longer active." };
+      if (game.status !== "lobby") {
+        return { ok: false, error: "This Game has already started." };
+      }
+      if (game.hostToken !== hostToken) {
+        return { ok: false, error: "Only the Host can start this Game." };
+      }
+      if (!Array.isArray(questions) || questions.length === 0) {
+        return { ok: false, error: "This Quiz has no Questions to play." };
+      }
+
+      const index = 0;
+      const question = questions[index];
+      const opensAt = now() + (introMs ?? DEFAULT_INTRO_MS);
+      const closesAt = opensAt + question.timeLimitSec * 1000;
+      const next = {
+        ...game,
+        status: "question",
+        questions,
+        currentIndex: index,
+        opensAt,
+        closesAt,
+        responses: {},
+      };
+      return {
+        ok: true,
+        store: { ...store, [pin]: next },
+        game: next,
+        events: [
+          {
+            type: "questionStarted",
+            pin,
+            index,
+            question,
+            opensAt,
+            closesAt,
+            playerCount: game.players.length,
+          },
+        ],
+      };
+    },
+
+    /**
+     * A Player taps an Option. The Response locks instantly (first tap wins) and
+     * is scored time-scaled: full points at `opensAt`, half at `closesAt`, zero
+     * when wrong. A tap in the intro beat (before `opensAt`) counts as instant.
+     * When every connected Player has answered, an `allAnswered` event tells the
+     * adapter to start the 2s grace before closing.
+     * @param {GameStore} store
+     * @param {{ pin: string, playerId: string, optionId: string }} cmd
+     * @returns {CommandResult}
+     */
+    submitResponse(store, { pin, playerId, optionId }) {
+      const game = store[pin];
+      if (!game) return { ok: false, error: "That Game is no longer active." };
+      if (game.status !== "question") {
+        return { ok: false, error: "There's no open Question to answer." };
+      }
+      const question = game.questions[game.currentIndex];
+      if (!game.players.some((p) => p.id === playerId)) {
+        return { ok: false, error: "You're not in this Game." };
+      }
+      if (game.responses[playerId]) {
+        return { ok: false, error: "You've already answered this Question." };
+      }
+      if (!question.options.some((o) => o.id === optionId)) {
+        return { ok: false, error: "That's not an Option on this Question." };
+      }
+
+      const at = now();
+      const limitMs = question.timeLimitSec * 1000;
+      const timeUsed = clamp(at - game.opensAt, 0, limitMs);
+      const correct = optionId === question.correctOptionId;
+      const points = correct
+        ? Math.round(question.points * (1 - timeUsed / limitMs / 2))
+        : 0;
+
+      /** @type {Response} */
+      const response = { optionId, timeUsed, correct, points, at };
+      const responses = { ...game.responses, [playerId]: response };
+      const next = { ...game, responses };
+
+      const answeredCount = Object.keys(responses).length;
+      const connectedCount = game.players.filter((p) => p.connected).length;
+      /** @type {GameEvent[]} */
+      const events = [
+        { type: "responseRecorded", pin, playerId, answeredCount, connectedCount },
+      ];
+      if (connectedCount > 0 && answeredCount >= connectedCount) {
+        events.push({ type: "allAnswered", pin });
+      }
+
+      return {
+        ok: true,
+        store: { ...store, [pin]: next },
+        game: next,
+        events,
+      };
+    },
+
+    /**
+     * Close the live Question and reveal it: tally the Distribution across
+     * Options, bank each Player's points into their running score, and report
+     * per-Player results. Idempotent — a second close (both the timer and the
+     * all-answered grace can fire) is a no-op so racing timers never crash.
+     * @param {GameStore} store
+     * @param {{ pin: string }} cmd
+     * @returns {CommandResult}
+     */
+    closeQuestion(store, { pin }) {
+      const game = store[pin];
+      if (!game) return { ok: false, error: "That Game is no longer active." };
+      if (game.status !== "question") {
+        // Already revealed (or never opened): nothing to do.
+        return { ok: true, store, game, events: [] };
+      }
+
+      const index = game.currentIndex;
+      const question = game.questions[index];
+
+      const counts = question.options.map((o) => ({
+        optionId: o.id,
+        count: Object.values(game.responses).filter((r) => r.optionId === o.id).length,
+      }));
+      const answered = Object.keys(game.responses).length;
+      /** @type {Distribution} */
+      const distribution = { counts, noAnswer: game.players.length - answered };
+
+      const players = game.players.map((p) => {
+        const r = game.responses[p.id];
+        return { ...p, score: p.score + (r ? r.points : 0) };
+      });
+      /** @type {QuestionResult[]} */
+      const results = players.map((p) => {
+        const r = game.responses[p.id];
+        return {
+          playerId: p.id,
+          optionId: r ? r.optionId : null,
+          correct: r ? r.correct : false,
+          points: r ? r.points : 0,
+          timeUsed: r ? r.timeUsed : null,
+          totalScore: p.score,
+        };
+      });
+
+      const next = { ...game, status: "reveal", players };
+      return {
+        ok: true,
+        store: { ...store, [pin]: next },
+        game: next,
+        events: [
+          {
+            type: "questionClosed",
+            pin,
+            index,
+            correctOptionId: question.correctOptionId,
+            distribution,
+            results,
+            players,
+          },
+        ],
+      };
+    },
   };
 }
 
-module.exports = { createEngine, randomPin };
+module.exports = { createEngine, randomPin, DEFAULT_INTRO_MS, GRACE_MS };

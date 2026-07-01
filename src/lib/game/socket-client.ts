@@ -22,6 +22,51 @@ export interface LobbyPlayer {
   joinedAt: number;
 }
 
+// A Question as it reaches a phone during play — the authored shape minus the
+// correct Option, which only travels at the Reveal. Shared by the Host screen
+// and Player phones.
+export interface PlayQuestion {
+  id: string;
+  type: "single" | "truefalse";
+  text: string;
+  imageUrl: string | null;
+  options: { id: string; text: string }[];
+  timeLimitSec: number;
+  points: number;
+}
+
+// Payload of `question:begin`: the Question plus its intro/answer windows in ms
+// (relative to receipt, so each screen runs its own countdown) and the Player
+// count answering.
+export interface QuestionBegin {
+  index: number;
+  question: PlayQuestion;
+  introMs: number;
+  answerMs: number;
+  total: number;
+}
+
+// The per-Question Distribution of Responses across Options (docs/CONTEXT.md).
+export interface Distribution {
+  counts: { optionId: string; count: number }[];
+  noAnswer: number;
+}
+
+// Payload of `question:reveal`: the correct Option and the Distribution, shown
+// on the Host screen and used by Players to see whether they were right.
+export interface QuestionReveal {
+  index: number;
+  correctOptionId: string;
+  distribution: Distribution;
+}
+
+// Payload of `you:result`: a single Player's own outcome for the closed Question.
+export interface YouResult {
+  correct: boolean;
+  pointsGained: number;
+  totalScore: number;
+}
+
 // A stable per-browser Player identity (PRD "Identity & reconnection"): a UUID
 // kept in localStorage, so a reconnecting client re-attaches to the same Player
 // rather than the socket id. Reconnection itself lands in #9.
