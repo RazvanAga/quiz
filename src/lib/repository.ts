@@ -51,6 +51,7 @@ export interface QuizRepository {
   deleteQuiz(id: string): void;
   addQuestion(quizId: string, type?: QuestionType): Question;
   updateQuestion(questionId: string, input: QuestionInput): Question;
+  setQuestionImage(questionId: string, imageUrl: string | null): string | null;
   reorderQuestions(quizId: string, orderedIds: string[]): void;
   deleteQuestion(questionId: string): void;
 }
@@ -234,6 +235,19 @@ export function createQuizRepository(db: Database.Database): QuizRepository {
 
       apply();
       return toQuestion(getQuestionRow(questionId));
+    },
+
+    setQuestionImage(questionId: string, imageUrl: string | null): string | null {
+      // The image is optional and edited on its own (upload / replace / remove),
+      // independent of the Question's text and Options, so it lives outside
+      // updateQuestion. Returns the previous URL so the caller can delete the
+      // now-orphaned file off disk.
+      const existing = getQuestionRow(questionId);
+      db.prepare(
+        "UPDATE question SET image_url = ?, updated_at = datetime('now') WHERE id = ?",
+      ).run(imageUrl, questionId);
+      touchQuiz.run(existing.quiz_id);
+      return existing.image_url;
     },
 
     reorderQuestions(quizId: string, orderedIds: string[]): void {

@@ -172,6 +172,42 @@ describe("Question authoring", () => {
     );
   });
 
+  it("attaches, replaces, and removes a Question's optional image", () => {
+    const quiz = repo.createQuiz("Capitals");
+    const q = repo.addQuestion(quiz.id);
+
+    // A new Question starts with no image.
+    expect(q.imageUrl).toBeNull();
+
+    // Attaching returns the previous URL (none), and it round-trips on read.
+    expect(repo.setQuestionImage(q.id, "/uploads/a.png")).toBeNull();
+    expect(repo.getQuiz(quiz.id)!.questions[0].imageUrl).toBe("/uploads/a.png");
+
+    // Replacing hands back the URL it displaced so the old file can be cleaned up.
+    expect(repo.setQuestionImage(q.id, "/uploads/b.png")).toBe("/uploads/a.png");
+    expect(repo.getQuiz(quiz.id)!.questions[0].imageUrl).toBe("/uploads/b.png");
+
+    // Removing clears it and returns the URL that was there.
+    expect(repo.setQuestionImage(q.id, null)).toBe("/uploads/b.png");
+    expect(repo.getQuiz(quiz.id)!.questions[0].imageUrl).toBeNull();
+  });
+
+  it("keeps a Question's image when its text and Options are edited", () => {
+    const quiz = repo.createQuiz("Capitals");
+    const q = repo.addQuestion(quiz.id);
+    repo.setQuestionImage(q.id, "/uploads/keep.png");
+
+    repo.updateQuestion(q.id, {
+      text: "Edited",
+      timeLimitSec: 20,
+      points: 1000,
+      options: q.options,
+      correctOptionId: q.options[0].id,
+    });
+
+    expect(repo.getQuiz(quiz.id)!.questions[0].imageUrl).toBe("/uploads/keep.png");
+  });
+
   it("deletes a Question and its Options without touching the Quiz", () => {
     const quiz = repo.createQuiz("Capitals");
     const a = repo.addQuestion(quiz.id);

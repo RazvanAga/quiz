@@ -9,9 +9,14 @@ import { QuestionList } from "./question-list";
 import {
   addQuestionAction,
   deleteQuestionAction,
+  removeQuestionImageAction,
   renameQuizAction,
+  setQuestionImageAction,
   updateQuestionAction,
 } from "./actions";
+
+// Image types the upload endpoint accepts, mirrored here to hint the file picker.
+const IMAGE_ACCEPT = "image/png,image/jpeg,image/gif,image/webp,image/svg+xml";
 
 export const dynamic = "force-dynamic";
 
@@ -132,6 +137,68 @@ function QuestionCard({
             Delete
           </ConfirmButton>
         </form>
+      </div>
+
+      {/* Optional image, edited on its own so saving text/Options never disturbs
+          it. A file input + explicit button matches the rest of the editor. */}
+      <div className="mb-4">
+        {question.imageUrl ? (
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={question.imageUrl}
+              alt=""
+              className="max-h-40 rounded-lg border border-slate-800 object-contain"
+            />
+            <div className="flex flex-col gap-2">
+              <form action={setQuestionImageAction} className="flex flex-col gap-2">
+                <input type="hidden" name="quizId" value={quizId} />
+                <input type="hidden" name="questionId" value={question.id} />
+                <input
+                  type="file"
+                  name="image"
+                  accept={IMAGE_ACCEPT}
+                  aria-label="Replace image"
+                  className="text-sm text-slate-400 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-800 file:px-3 file:py-1.5 file:text-slate-200 hover:file:bg-slate-700"
+                />
+                <button
+                  type="submit"
+                  className="w-fit rounded-lg border border-slate-700 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-800"
+                >
+                  Replace image
+                </button>
+              </form>
+              <form action={removeQuestionImageAction}>
+                <input type="hidden" name="quizId" value={quizId} />
+                <input type="hidden" name="questionId" value={question.id} />
+                <button
+                  type="submit"
+                  className="w-fit text-sm font-medium text-red-400 hover:text-red-300"
+                >
+                  Remove image
+                </button>
+              </form>
+            </div>
+          </div>
+        ) : (
+          <form action={setQuestionImageAction} className="flex flex-wrap items-center gap-3">
+            <input type="hidden" name="quizId" value={quizId} />
+            <input type="hidden" name="questionId" value={question.id} />
+            <input
+              type="file"
+              name="image"
+              accept={IMAGE_ACCEPT}
+              aria-label="Question image"
+              className="text-sm text-slate-400 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-800 file:px-3 file:py-1.5 file:text-slate-200 hover:file:bg-slate-700"
+            />
+            <button
+              type="submit"
+              className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-800"
+            >
+              Add image
+            </button>
+          </form>
+        )}
       </div>
 
       <form action={updateQuestionAction} className="space-y-4">
