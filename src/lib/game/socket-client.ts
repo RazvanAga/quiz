@@ -67,6 +67,29 @@ export interface YouResult {
   totalScore: number;
 }
 
+// One ranked row of an interim Leaderboard or the final Podium (docs/CONTEXT.md).
+// Ranks share on ties (standard competition ranking), highest score first.
+export interface Standing {
+  playerId: string;
+  name: string;
+  avatar: string;
+  score: number;
+  rank: number;
+}
+
+// Payload of `game:leaderboard`: the interim standings after a Reveal, plus
+// whether another Question follows (so the Host shows "Next" vs "Final results").
+export interface LeaderboardUpdate {
+  index: number;
+  standings: Standing[];
+  hasNext: boolean;
+}
+
+// Payload of `game:podium`: the final ranking shown when the Game finishes.
+export interface Podium {
+  standings: Standing[];
+}
+
 // A stable per-browser Player identity (PRD "Identity & reconnection"): a UUID
 // kept in localStorage, so a reconnecting client re-attaches to the same Player
 // rather than the socket id. Reconnection itself lands in #9.

@@ -239,6 +239,53 @@ function playingGame(names: string[]) {
   return { engine, clock, store, started };
 }
 
+// A second single-choice Question so a full Game spans more than one: 10s limit,
+// 500 points, "t" correct.
+const QUESTION_2: EngineQuestion = {
+  id: "q2",
+  type: "single",
+  text: "Capital of France?",
+  imageUrl: null,
+  options: [
+    { id: "t", text: "Paris" },
+    { id: "u", text: "Rome" },
+    { id: "v", text: "Berlin" },
+    { id: "w", text: "Madrid" },
+  ],
+  correctOptionId: "t",
+  timeLimitSec: 10,
+  points: 500,
+};
+
+// Build a Game started on the given Questions with the given Players joined,
+// intro skipped (introMs 0) and the clock left at the first Question's opensAt.
+function playingGameWith(questions: EngineQuestion[], names: string[]) {
+  const clock = manualClock(0);
+  const engine = createEngine({ now: clock, newPin: () => "0001" });
+  let store: GameStore = {};
+
+  const created = engine.createGame(store, { quizId: "q", hostToken: "host-1" });
+  if (!created.ok) throw new Error("createGame failed");
+  store = created.store;
+
+  for (const name of names) {
+    const joined = engine.playerJoin(store, { pin: "0001", playerId: name, name, avatar: "fox" });
+    if (!joined.ok) throw new Error(`join ${name} failed`);
+    store = joined.store;
+  }
+
+  const started = engine.startGame(store, {
+    pin: "0001",
+    hostToken: "host-1",
+    questions,
+    introMs: 0,
+  });
+  if (!started.ok) throw new Error("startGame failed");
+  store = started.store;
+
+  return { engine, clock, store };
+}
+
 describe("startGame", () => {
   it("opens the first Question with intro then answer windows and stops joins", () => {
     const { started } = playingGame(["Ada"]);
@@ -425,6 +472,180 @@ describe("closeQuestion", () => {
     expect(second.ok).toBe(true);
     if (!second.ok) return;
     expect(second.events).toEqual([]);
+  });
+});
+
+describe("advance and finish", () => {
+  // Drive one Question to its Reveal: answer (optionally), jump to the buzzer,
+  // and close. Returns the post-Reveal store.
+  function revealFirstQuestion(
+    engine: Engine,
+    clock: ReturnType<typeof manualClock>,
+    store: GameStore,
+    answers: Record<string, string>,
+    limitSec: number,
+  ): GameStore {
+    let s = store;
+    clock.set(0);
+    for (const [playerId, optionId] of Object.entries(answers)) {
+      const r = engine.submitResponse(s, { pin: "0001", playerId, optionId });
+      if (!r.ok) throw new Error(`submit ${playerId} failed`);
+      s = r.store;
+    }
+    clock.set(limitSec * 1000);
+    const closed = engine.closeQuestion(s, { pin: "0001" });
+    if (!closed.ok) throw new Error("close failed");
+    return closed.store;
+  }
+
+  it("advances Reveal → interim Leaderboard ranked by score", () => {
+    const { engine, clock, store } = playingGameWith([QUESTION, QUESTION_2], ["Ada", "Bo"]);
+    // Ada is right (full points), Bo is wrong (zero).
+    let s = revealFirstQuestion(engine, clock, store, { Ada: "a", Bo: "b" }, 20);
+
+    const adv = engine.advance(s, { pin: "0001", hostToken: "host-1" });
+    expect(adv.ok).toBe(true);
+    if (!adv.ok) return;
+    expect(adv.game.status).toBe("leaderboard");
+
+    const event = adv.events[0];
+    expect(event.type).toBe("leaderboard");
+    if (event.type !== "leaderboard") return;
+    expect(event.index).toBe(0);
+    expect(event.hasNext).toBe(true); // a second Question remains
+    expect(event.standings).toEqual([
+      { playerId: "Ada", name: "Ada", avatar: "fox", score: 1000, rank: 1 },
+      { playerId: "Bo", name: "Bo", avatar: "fox", score: 0, rank: 2 },
+    ]);
+  });
+
+  it("advances the Leaderboard into the next Question", () => {
+    const { engine, clock, store } = playingGameWith([QUESTION, QUESTION_2], ["Ada"]);
+    const s = revealFirstQuestion(engine, clock, store, { Ada: "a" }, 20);
+    const toBoard = engine.advance(s, { pin: "0001", hostToken: "host-1" });
+    if (!toBoard.ok) throw new Error("to leaderboard failed");
+
+    const toNext = engine.advance(toBoard.store, { pin: "0001", hostToken: "host-1" });
+    expect(toNext.ok).toBe(true);
+    if (!toNext.ok) return;
+    expect(toNext.game.status).toBe("question");
+    expect(toNext.game.currentIndex).toBe(1);
+    // Responses reset for the fresh Question; banked score carries over.
+    expect(toNext.game.responses).toEqual({});
+    expect(toNext.game.players[0].score).toBe(1000);
+
+    const event = toNext.events[0];
+    expect(event.type).toBe("questionStarted");
+    if (event.type !== "questionStarted") return;
+    expect(event.question.id).toBe("q2");
+  });
+
+  it("won't advance past the last Question's Leaderboard", () => {
+    const { engine, clock, store } = playingGameWith([QUESTION], ["Ada"]);
+    const s = revealFirstQuestion(engine, clock, store, { Ada: "a" }, 20);
+    const toBoard = engine.advance(s, { pin: "0001", hostToken: "host-1" });
+    if (!toBoard.ok) throw new Error("to leaderboard failed");
+    // hasNext is false on the only Question's Leaderboard.
+    const board = toBoard.events[0];
+    expect(board.type === "leaderboard" && board.hasNext).toBe(false);
+
+    const past = engine.advance(toBoard.store, { pin: "0001", hostToken: "host-1" });
+    expect(past.ok).toBe(false);
+    if (past.ok) return;
+    expect(past.error).toMatch(/finish/i);
+  });
+
+  it("rejects advance and finish from anyone but the Host", () => {
+    const { engine, clock, store } = playingGameWith([QUESTION], ["Ada"]);
+    const s = revealFirstQuestion(engine, clock, store, { Ada: "a" }, 20);
+    const adv = engine.advance(s, { pin: "0001", hostToken: "nope" });
+    expect(adv.ok).toBe(false);
+    const fin = engine.finish(s, { pin: "0001", hostToken: "nope" });
+    expect(fin.ok).toBe(false);
+    if (fin.ok) return;
+    expect(fin.error).toMatch(/host/i);
+  });
+
+  it("finishes to a Podium with the full ranking", () => {
+    const { engine, clock, store } = playingGameWith([QUESTION], ["Ada", "Bo"]);
+    const s = revealFirstQuestion(engine, clock, store, { Ada: "a", Bo: "b" }, 20);
+    const toBoard = engine.advance(s, { pin: "0001", hostToken: "host-1" });
+    if (!toBoard.ok) throw new Error("to leaderboard failed");
+
+    const fin = engine.finish(toBoard.store, { pin: "0001", hostToken: "host-1" });
+    expect(fin.ok).toBe(true);
+    if (!fin.ok) return;
+    expect(fin.game.status).toBe("podium");
+
+    const event = fin.events[0];
+    expect(event.type).toBe("gameFinished");
+    if (event.type !== "gameFinished") return;
+    expect(event.standings).toEqual([
+      { playerId: "Ada", name: "Ada", avatar: "fox", score: 1000, rank: 1 },
+      { playerId: "Bo", name: "Bo", avatar: "fox", score: 0, rank: 2 },
+    ]);
+  });
+
+  it("is idempotent once on the Podium so a double finish is harmless", () => {
+    const { engine, clock, store } = playingGameWith([QUESTION], ["Ada"]);
+    const s = revealFirstQuestion(engine, clock, store, { Ada: "a" }, 20);
+    const first = engine.finish(s, { pin: "0001", hostToken: "host-1" });
+    if (!first.ok) throw new Error("first finish failed");
+    expect(first.game.status).toBe("podium");
+    const second = engine.finish(first.store, { pin: "0001", hostToken: "host-1" });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.events).toEqual([]);
+  });
+
+  it("gives tied Players the same rank (standard competition ranking)", () => {
+    const { engine, clock, store } = playingGameWith([QUESTION], ["Ada", "Bo", "Cy"]);
+    // Ada and Bo both answer correctly at the open (full points); Cy is wrong.
+    const s = revealFirstQuestion(engine, clock, store, { Ada: "a", Bo: "a", Cy: "b" }, 20);
+    const fin = engine.finish(s, { pin: "0001", hostToken: "host-1" });
+    if (!fin.ok) throw new Error("finish failed");
+    const event = fin.events[0];
+    if (event.type !== "gameFinished") throw new Error("expected gameFinished");
+    // Ada and Bo share rank 1; Cy is rank 3 (rank 2 is skipped).
+    expect(event.standings.map((s2) => [s2.playerId, s2.rank])).toEqual([
+      ["Ada", 1],
+      ["Bo", 1],
+      ["Cy", 3],
+    ]);
+  });
+
+  it("plays a full Game: lobby → two Questions → Podium, banking scores", () => {
+    const { engine, clock, store } = playingGameWith([QUESTION, QUESTION_2], ["Ada", "Bo"]);
+
+    // Q1 (1000 pts): Ada right at open (1000), Bo wrong (0).
+    let s = revealFirstQuestion(engine, clock, store, { Ada: "a", Bo: "b" }, 20);
+    expect(s["0001"].status).toBe("reveal");
+    s = (engine.advance(s, { pin: "0001", hostToken: "host-1" }) as { store: GameStore }).store;
+    expect(s["0001"].status).toBe("leaderboard");
+    const toQ2 = engine.advance(s, { pin: "0001", hostToken: "host-1" });
+    if (!toQ2.ok) throw new Error("advance to Q2 failed");
+    s = toQ2.store;
+    expect(s["0001"].status).toBe("question");
+    expect(s["0001"].currentIndex).toBe(1);
+
+    // Q2 (500 pts, 10s): both right at open → +500 each.
+    clock.set(0);
+    s = (engine.submitResponse(s, { pin: "0001", playerId: "Ada", optionId: "t" }) as { store: GameStore }).store;
+    s = (engine.submitResponse(s, { pin: "0001", playerId: "Bo", optionId: "t" }) as { store: GameStore }).store;
+    clock.set(10_000);
+    s = (engine.closeQuestion(s, { pin: "0001" }) as { store: GameStore }).store;
+    s = (engine.advance(s, { pin: "0001", hostToken: "host-1" }) as { store: GameStore }).store;
+
+    const fin = engine.finish(s, { pin: "0001", hostToken: "host-1" });
+    if (!fin.ok) throw new Error("finish failed");
+    expect(fin.game.status).toBe("podium");
+    const event = fin.events[0];
+    if (event.type !== "gameFinished") throw new Error("expected gameFinished");
+    // Ada 1000 + 500 = 1500 (rank 1); Bo 0 + 500 = 500 (rank 2).
+    expect(event.standings).toEqual([
+      { playerId: "Ada", name: "Ada", avatar: "fox", score: 1500, rank: 1 },
+      { playerId: "Bo", name: "Bo", avatar: "fox", score: 500, rank: 2 },
+    ]);
   });
 });
 

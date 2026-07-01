@@ -22,11 +22,14 @@
  */
 
 /**
- * The Game lifecycle (PRD state machine). #5 built the lobby; #6 adds one
- * Question end-to-end: `question` covers the intro beat and the open answering
- * window (options become tappable at `opensAt`), then `reveal` shows the correct
- * Option and the Distribution. Leaderboard/Podium/advance land in #7.
- * @typedef {"lobby" | "question" | "reveal"} GameStatus
+ * The Game lifecycle (PRD state machine). #5 built the lobby; #6 played one
+ * Question end-to-end; #7 turns that into a full Game: `question` covers the
+ * intro beat and the open answering window (options become tappable at
+ * `opensAt`), `reveal` shows the correct Option and the Distribution, then the
+ * Host advances to the interim `leaderboard`, and after the last Question the
+ * Game reaches its final `podium`. State stays in memory (ADR-0002); persisting
+ * the finished Game as a Game Record lands in #8.
+ * @typedef {"lobby" | "question" | "reveal" | "leaderboard" | "podium"} GameStatus
  */
 
 /**
@@ -96,13 +99,27 @@
  */
 
 /**
+ * One row of a ranked standing — an interim Leaderboard or the final Podium.
+ * Ranks use standard competition ordering (ties share a rank; the next rank
+ * skips), highest score first.
+ * @typedef {Object} Standing
+ * @property {string} playerId
+ * @property {string} name
+ * @property {string} avatar
+ * @property {number} score
+ * @property {number} rank    1-based
+ */
+
+/**
  * An event the adapter should emit over Socket.IO in response to a command.
  * @typedef {{ type: "gameCreated", pin: string }
  *   | { type: "playerJoined", pin: string, player: Player, players: Player[] }
  *   | { type: "questionStarted", pin: string, index: number, question: EngineQuestion, opensAt: number, closesAt: number, playerCount: number }
  *   | { type: "responseRecorded", pin: string, playerId: string, answeredCount: number, connectedCount: number }
  *   | { type: "allAnswered", pin: string }
- *   | { type: "questionClosed", pin: string, index: number, correctOptionId: string, distribution: Distribution, results: QuestionResult[], players: Player[] }} GameEvent
+ *   | { type: "questionClosed", pin: string, index: number, correctOptionId: string, distribution: Distribution, results: QuestionResult[], players: Player[] }
+ *   | { type: "leaderboard", pin: string, index: number, standings: Standing[], hasNext: boolean }
+ *   | { type: "gameFinished", pin: string, standings: Standing[] }} GameEvent
  */
 
 /**
@@ -119,6 +136,8 @@
  * @property {(store: GameStore, cmd: { pin: string, hostToken: string, questions: EngineQuestion[], introMs?: number }) => CommandResult} startGame
  * @property {(store: GameStore, cmd: { pin: string, playerId: string, optionId: string }) => CommandResult} submitResponse
  * @property {(store: GameStore, cmd: { pin: string }) => CommandResult} closeQuestion
+ * @property {(store: GameStore, cmd: { pin: string, hostToken: string }) => CommandResult} advance
+ * @property {(store: GameStore, cmd: { pin: string, hostToken: string }) => CommandResult} finish
  */
 
 /** Generate a random 4-digit Game PIN, e.g. "0042". */
@@ -143,6 +162,28 @@ function clamp(n, min, max) {
 }
 
 /**
+ * Rank Players into a standing (interim Leaderboard or final Podium): highest
+ * score first, ties broken by name for a stable order, with standard
+ * competition ranks (ties share a rank, the next rank skips accordingly).
+ * @param {Player[]} players
+ * @returns {Standing[]}
+ */
+function rankStandings(players) {
+  const sorted = [...players].sort(
+    (a, b) => b.score - a.score || a.name.localeCompare(b.name),
+  );
+  let rank = 0;
+  let prevScore = null;
+  return sorted.map((p, i) => {
+    if (p.score !== prevScore) {
+      rank = i + 1;
+      prevScore = p.score;
+    }
+    return { playerId: p.id, name: p.name, avatar: p.avatar, score: p.score, rank };
+  });
+}
+
+/**
  * Create an engine bound to its injected dependencies.
  * @param {{ now?: () => number, newPin?: () => string }} [deps]
  */
@@ -162,6 +203,43 @@ function createEngine(deps = {}) {
       if (!(pin in store)) return pin;
     }
     throw new Error("No free Game PIN is available");
+  }
+
+  /**
+   * Open the Question at `index` on `game`: schedule its intro/answer windows
+   * off the injected clock and produce the questionStarted event. Shared by
+   * startGame (first Question) and advance (each subsequent Question) so both
+   * open a Question the same way.
+   * @param {Game} game
+   * @param {number} index
+   * @param {number} [introMs]
+   * @returns {{ next: Game, event: GameEvent }}
+   */
+  function beginQuestion(game, index, introMs) {
+    const question = game.questions[index];
+    const opensAt = now() + (introMs ?? DEFAULT_INTRO_MS);
+    const closesAt = opensAt + question.timeLimitSec * 1000;
+    /** @type {Game} */
+    const next = {
+      ...game,
+      status: "question",
+      currentIndex: index,
+      opensAt,
+      closesAt,
+      responses: {},
+    };
+    return {
+      next,
+      event: {
+        type: "questionStarted",
+        pin: game.pin,
+        index,
+        question,
+        opensAt,
+        closesAt,
+        playerCount: game.players.length,
+      },
+    };
   }
 
   return {
@@ -281,34 +359,12 @@ function createEngine(deps = {}) {
         return { ok: false, error: "This Quiz has no Questions to play." };
       }
 
-      const index = 0;
-      const question = questions[index];
-      const opensAt = now() + (introMs ?? DEFAULT_INTRO_MS);
-      const closesAt = opensAt + question.timeLimitSec * 1000;
-      const next = {
-        ...game,
-        status: "question",
-        questions,
-        currentIndex: index,
-        opensAt,
-        closesAt,
-        responses: {},
-      };
+      const { next, event } = beginQuestion({ ...game, questions }, 0, introMs);
       return {
         ok: true,
         store: { ...store, [pin]: next },
         game: next,
-        events: [
-          {
-            type: "questionStarted",
-            pin,
-            index,
-            question,
-            opensAt,
-            closesAt,
-            playerCount: game.players.length,
-          },
-        ],
+        events: [event],
       };
     },
 
@@ -431,6 +487,95 @@ function createEngine(deps = {}) {
             players,
           },
         ],
+      };
+    },
+
+    /**
+     * The Host clicks "Next" to keep the Game moving. From a Reveal it shows the
+     * interim Leaderboard; from that Leaderboard it opens the next Question. The
+     * Host runs out of Questions here — the last Question's Leaderboard is
+     * advanced no further and the Host calls `finish` for the Podium instead.
+     * Only the Host (matching hostToken) can advance.
+     * @param {GameStore} store
+     * @param {{ pin: string, hostToken: string }} cmd
+     * @returns {CommandResult}
+     */
+    advance(store, { pin, hostToken }) {
+      const game = store[pin];
+      if (!game) return { ok: false, error: "That Game is no longer active." };
+      if (game.hostToken !== hostToken) {
+        return { ok: false, error: "Only the Host can advance this Game." };
+      }
+
+      if (game.status === "reveal") {
+        const hasNext = game.currentIndex + 1 < game.questions.length;
+        const next = { ...game, status: "leaderboard" };
+        return {
+          ok: true,
+          store: { ...store, [pin]: next },
+          game: next,
+          events: [
+            {
+              type: "leaderboard",
+              pin,
+              index: game.currentIndex,
+              standings: rankStandings(game.players),
+              hasNext,
+            },
+          ],
+        };
+      }
+
+      if (game.status === "leaderboard") {
+        const nextIndex = game.currentIndex + 1;
+        if (nextIndex >= game.questions.length) {
+          return {
+            ok: false,
+            error: "That was the last Question — finish the Game to show the Podium.",
+          };
+        }
+        const { next, event } = beginQuestion(game, nextIndex);
+        return {
+          ok: true,
+          store: { ...store, [pin]: next },
+          game: next,
+          events: [event],
+        };
+      }
+
+      return { ok: false, error: "There's nothing to advance to right now." };
+    },
+
+    /**
+     * End the Game and show the final Podium: the full ranking (top-3 celebrated
+     * on the Host screen, each Player's placement on their phone). Reachable from
+     * a Reveal or its Leaderboard; idempotent once on the Podium so a double
+     * click is harmless. The Podium stays in memory — persisting it as a Game
+     * Record lands in #8. Only the Host (matching hostToken) can finish.
+     * @param {GameStore} store
+     * @param {{ pin: string, hostToken: string }} cmd
+     * @returns {CommandResult}
+     */
+    finish(store, { pin, hostToken }) {
+      const game = store[pin];
+      if (!game) return { ok: false, error: "That Game is no longer active." };
+      if (game.hostToken !== hostToken) {
+        return { ok: false, error: "Only the Host can finish this Game." };
+      }
+      if (game.status === "podium") {
+        // Already finished: a second finish (e.g. a double click) is a no-op.
+        return { ok: true, store, game, events: [] };
+      }
+      if (game.status !== "reveal" && game.status !== "leaderboard") {
+        return { ok: false, error: "The Game isn't ready to finish yet." };
+      }
+
+      const next = { ...game, status: "podium" };
+      return {
+        ok: true,
+        store: { ...store, [pin]: next },
+        game: next,
+        events: [{ type: "gameFinished", pin, standings: rankStandings(game.players) }],
       };
     },
   };

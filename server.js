@@ -208,6 +208,58 @@ app.prepare().then(() => {
         }
       }
     });
+
+    // Host clicks "Next": from a Reveal, show the interim Leaderboard; from that
+    // Leaderboard, open the next Question with its intro beat and countdown. The
+    // engine owns which transition applies; we just fan its events out.
+    socket.on("host:advance", ({ pin, hostToken } = {}, ack) => {
+      const result = engine.advance(store, {
+        pin: String(pin || ""),
+        hostToken: String(hostToken || ""),
+      });
+      if (!result.ok) return ack?.({ ok: false, error: result.error });
+      store = result.store;
+      ack?.({ ok: true });
+
+      for (const event of result.events) {
+        if (event.type === "leaderboard") {
+          io.to(room(event.pin)).emit("game:leaderboard", {
+            index: event.index,
+            standings: event.standings,
+            hasNext: event.hasNext,
+          });
+        } else if (event.type === "questionStarted") {
+          io.to(room(event.pin)).emit("question:begin", {
+            index: event.index,
+            question: sanitizeQuestion(event.question),
+            introMs: Math.max(0, event.opensAt - Date.now()),
+            answerMs: event.closesAt - event.opensAt,
+            total: event.playerCount,
+          });
+          scheduleClose(event.pin, event.closesAt);
+        }
+      }
+    });
+
+    // Host clicks "Finish" after the last Question: end the Game and show the
+    // final Podium (full ranking) to the whole room. State stays in memory;
+    // persisting the finished Game as a Game Record lands in #8.
+    socket.on("host:finish", ({ pin, hostToken } = {}, ack) => {
+      const result = engine.finish(store, {
+        pin: String(pin || ""),
+        hostToken: String(hostToken || ""),
+      });
+      if (!result.ok) return ack?.({ ok: false, error: result.error });
+      store = result.store;
+      clearTimers(String(pin || ""));
+      ack?.({ ok: true });
+
+      for (const event of result.events) {
+        if (event.type === "gameFinished") {
+          io.to(room(event.pin)).emit("game:podium", { standings: event.standings });
+        }
+      }
+    });
   });
 
   httpServer

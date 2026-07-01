@@ -5,10 +5,13 @@ import { AVATARS, avatarGlyph } from "@/lib/game/avatars";
 import {
   getSocket,
   getPlayerId,
+  type LeaderboardUpdate,
   type LobbyPlayer,
   type PlayQuestion,
+  type Podium,
   type QuestionBegin,
   type QuestionReveal,
+  type Standing,
   type YouResult,
 } from "@/lib/game/socket-client";
 
@@ -28,7 +31,16 @@ const OPTION_ACCENTS = [
   "bg-emerald-600",
 ];
 
-type Phase = "form" | "joining" | "lobby" | "intro" | "open" | "answered" | "reveal";
+type Phase =
+  | "form"
+  | "joining"
+  | "lobby"
+  | "intro"
+  | "open"
+  | "answered"
+  | "reveal"
+  | "leaderboard"
+  | "podium";
 
 export function PlayerJoin() {
   const [name, setName] = useState("");
@@ -43,6 +55,8 @@ export function PlayerJoin() {
   const [remaining, setRemaining] = useState(0);
   const [reveal, setReveal] = useState<QuestionReveal | null>(null);
   const [result, setResult] = useState<YouResult | null>(null);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardUpdate | null>(null);
+  const [podium, setPodium] = useState<Podium | null>(null);
 
   const joined = phase !== "form" && phase !== "joining";
   const introTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -87,15 +101,29 @@ export function PlayerJoin() {
       setResult(data);
     }
 
+    function onLeaderboard(data: LeaderboardUpdate) {
+      setLeaderboard(data);
+      setPhase("leaderboard");
+    }
+
+    function onPodium(data: Podium) {
+      setPodium(data);
+      setPhase("podium");
+    }
+
     socket.on("lobby:update", onLobbyUpdate);
     socket.on("question:begin", onBegin);
     socket.on("question:reveal", onReveal);
     socket.on("you:result", onResult);
+    socket.on("game:leaderboard", onLeaderboard);
+    socket.on("game:podium", onPodium);
     return () => {
       socket.off("lobby:update", onLobbyUpdate);
       socket.off("question:begin", onBegin);
       socket.off("question:reveal", onReveal);
       socket.off("you:result", onResult);
+      socket.off("game:leaderboard", onLeaderboard);
+      socket.off("game:podium", onPodium);
       if (introTimer.current) clearTimeout(introTimer.current);
       if (tick.current) clearInterval(tick.current);
     };
@@ -131,6 +159,17 @@ export function PlayerJoin() {
     setChosen(optionId);
     setPhase("answered");
     getSocket().emit("player:submitResponse", { pin, playerId: getPlayerId(), optionId });
+  }
+
+  // The final Podium: the Player's own placement, celebrated, over the full
+  // ranking so they can see who beat them (PRD story 45).
+  if (phase === "podium" && podium) {
+    return <PlacementScreen standings={podium.standings} title="Game over" final />;
+  }
+
+  // The interim Leaderboard between Questions: where the Player stands right now.
+  if (phase === "leaderboard" && leaderboard) {
+    return <PlacementScreen standings={leaderboard.standings} title="Leaderboard" />;
   }
 
   // Playing a Question: intro beat, then tappable Options, then the Reveal.
@@ -291,6 +330,80 @@ export function PlayerJoin() {
           {phase === "joining" ? "Joining…" : "Join Game"}
         </button>
       </form>
+    </main>
+  );
+}
+
+// Medal glyphs for the top three; lower ranks show their number instead.
+const MEDALS = ["🥇", "🥈", "🥉"];
+
+// A Player's own placement (PRD stories 42, 45): their rank called out big — the
+// interim Leaderboard between Questions and the final Podium share this — over a
+// compact full ranking so they can see the rest of the room.
+function PlacementScreen({
+  standings,
+  title,
+  final = false,
+}: {
+  standings: Standing[];
+  title: string;
+  final?: boolean;
+}) {
+  const me = standings.find((s) => s.playerId === getPlayerId());
+  const medal = me && me.rank <= 3 ? MEDALS[me.rank - 1] : null;
+
+  return (
+    <main className="mx-auto flex min-h-screen max-w-md flex-col items-center gap-6 px-6 py-10 text-center">
+      <p className="text-sm font-semibold uppercase tracking-[0.3em] text-emerald-400">
+        {final ? "🏆 " : ""}
+        {title}
+      </p>
+
+      {me ? (
+        <div className="flex flex-col items-center gap-2">
+          <span className="text-6xl" aria-hidden>
+            {medal ?? avatarGlyph(me.avatar)}
+          </span>
+          <p className="text-4xl font-black text-slate-100">
+            {final ? "You finished" : "You're"} #{me.rank}
+          </p>
+          <p className="text-lg font-semibold text-slate-400">
+            of {standings.length} · {me.score} points
+          </p>
+        </div>
+      ) : (
+        <p className="text-2xl font-bold text-slate-300">Standings</p>
+      )}
+
+      <ol className="mt-2 w-full flex flex-col gap-2">
+        {standings.map((s) => {
+          const isMe = s.playerId === getPlayerId();
+          const rowMedal = s.rank <= 3 ? MEDALS[s.rank - 1] : null;
+          return (
+            <li
+              key={s.playerId}
+              className={`flex items-center gap-3 rounded-xl border px-4 py-2.5 text-left ${
+                isMe
+                  ? "border-indigo-500 bg-indigo-500/20"
+                  : "border-slate-800 bg-slate-900/60"
+              }`}
+            >
+              <span className="w-7 text-center text-lg font-black tabular-nums">
+                {rowMedal ?? s.rank}
+              </span>
+              <span className="text-2xl" aria-hidden>
+                {avatarGlyph(s.avatar)}
+              </span>
+              <span className="flex-1 truncate font-semibold text-slate-100">{s.name}</span>
+              <span className="font-mono font-bold tabular-nums text-emerald-400">{s.score}</span>
+            </li>
+          );
+        })}
+      </ol>
+
+      {!final && (
+        <p className="mt-2 text-sm text-slate-500">Hang tight — the Host will continue soon.</p>
+      )}
     </main>
   );
 }

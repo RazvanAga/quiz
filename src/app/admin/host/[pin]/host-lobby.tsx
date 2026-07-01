@@ -6,17 +6,21 @@ import { avatarGlyph } from "@/lib/game/avatars";
 import {
   getSocket,
   type Distribution,
+  type LeaderboardUpdate,
   type LobbyPlayer,
   type PlayQuestion,
+  type Podium,
   type QuestionBegin,
   type QuestionReveal,
+  type Standing,
 } from "@/lib/game/socket-client";
 
 // The Host's shared screen for one Game (PRD stories 18, 20, 21, 34, 39, 40): the
 // Lobby with its Game PIN and Players popping in live, a Start control, then per
 // Question an intro beat → Options with a countdown and a live answered-count →
-// the Reveal with the correct Option and the Distribution. Leaderboard/Podium
-// and advancing to the next Question land in #7; here we play one Question.
+// the Reveal with the correct Option and the Distribution. After each Reveal the
+// Host clicks Next for the interim Leaderboard, then again to advance; after the
+// last Question the Game reaches its final Podium (top-3 + full ranking).
 
 // Kahoot-style Option accents, assigned by position.
 const OPTION_ACCENTS = [
@@ -26,7 +30,10 @@ const OPTION_ACCENTS = [
   "bg-emerald-600",
 ];
 
-type Phase = "lobby" | "intro" | "open" | "reveal";
+// Medal glyphs for the top three of a standing; the rest show their rank number.
+const MEDALS = ["🥇", "🥈", "🥉"];
+
+type Phase = "lobby" | "intro" | "open" | "reveal" | "leaderboard" | "podium";
 
 export function HostGame({ pin, questions }: { pin: string; questions: Question[] }) {
   const [players, setPlayers] = useState<LobbyPlayer[]>([]);
@@ -39,6 +46,9 @@ export function HostGame({ pin, questions }: { pin: string; questions: Question[
   const [total, setTotal] = useState(0);
   const [remaining, setRemaining] = useState(0);
   const [reveal, setReveal] = useState<QuestionReveal | null>(null);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardUpdate | null>(null);
+  const [podium, setPodium] = useState<Podium | null>(null);
+  const [advancing, setAdvancing] = useState(false);
 
   // Timers the intro beat and the countdown run on; cleared on teardown so a new
   // Question (or unmount) never leaves a stale tick behind.
@@ -68,6 +78,7 @@ export function HostGame({ pin, questions }: { pin: string; questions: Question[
       if (introTimer.current) clearTimeout(introTimer.current);
       if (tick.current) clearInterval(tick.current);
       setReveal(null);
+      setLeaderboard(null);
       setAnswered(0);
       setTotal(data.total);
       setQuestion(data.question);
@@ -95,18 +106,32 @@ export function HostGame({ pin, questions }: { pin: string; questions: Question[
       setPhase("reveal");
     }
 
+    function onLeaderboard(data: LeaderboardUpdate) {
+      setLeaderboard(data);
+      setPhase("leaderboard");
+    }
+
+    function onPodium(data: Podium) {
+      setPodium(data);
+      setPhase("podium");
+    }
+
     attach();
     socket.on("connect", attach);
     socket.on("lobby:update", onLobbyUpdate);
     socket.on("question:begin", onBegin);
     socket.on("question:progress", onProgress);
     socket.on("question:reveal", onReveal);
+    socket.on("game:leaderboard", onLeaderboard);
+    socket.on("game:podium", onPodium);
     return () => {
       socket.off("connect", attach);
       socket.off("lobby:update", onLobbyUpdate);
       socket.off("question:begin", onBegin);
       socket.off("question:progress", onProgress);
       socket.off("question:reveal", onReveal);
+      socket.off("game:leaderboard", onLeaderboard);
+      socket.off("game:podium", onPodium);
       if (introTimer.current) clearTimeout(introTimer.current);
       if (tick.current) clearInterval(tick.current);
     };
@@ -125,6 +150,21 @@ export function HostGame({ pin, questions }: { pin: string; questions: Question[
     );
   }
 
+  // The Host's "Next"/"Finish" controls after a Question: the server decides
+  // which transition applies, so both share this one caller.
+  function hostAction(event: "host:advance" | "host:finish") {
+    setAdvancing(true);
+    const hostToken = localStorage.getItem(`quiz:hostToken:${pin}`) ?? "";
+    getSocket().emit(
+      event,
+      { pin, hostToken },
+      (res: { ok: true } | { ok: false; error: string }) => {
+        setAdvancing(false);
+        if (!res.ok) window.alert(res.error);
+      },
+    );
+  }
+
   if (status === "gone") {
     return (
       <main className="flex min-h-screen flex-col items-center justify-center gap-4 px-6 text-center">
@@ -136,7 +176,7 @@ export function HostGame({ pin, questions }: { pin: string; questions: Question[
     );
   }
 
-  if (phase !== "lobby" && question) {
+  if ((phase === "intro" || phase === "open" || phase === "reveal") && question) {
     return (
       <main className="mx-auto flex min-h-screen max-w-5xl flex-col px-6 py-10">
         <div className="flex items-start justify-between gap-6">
@@ -198,9 +238,60 @@ export function HostGame({ pin, questions }: { pin: string; questions: Question[
                 );
               })}
             </ul>
-            {phase === "reveal" && <RevealFooter distribution={reveal!.distribution} />}
+            {phase === "reveal" && (
+              <>
+                <RevealFooter distribution={reveal!.distribution} />
+                <div className="mt-8 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => hostAction("host:advance")}
+                    disabled={advancing}
+                    className="rounded-xl bg-emerald-600 px-8 py-3 text-lg font-bold text-white hover:bg-emerald-500 disabled:opacity-50"
+                  >
+                    {advancing ? "…" : "Leaderboard →"}
+                  </button>
+                </div>
+              </>
+            )}
           </>
         )}
+      </main>
+    );
+  }
+
+  if (phase === "leaderboard" && leaderboard) {
+    const last = !leaderboard.hasNext;
+    return (
+      <main className="mx-auto flex min-h-screen max-w-3xl flex-col px-6 py-10">
+        <h1 className="text-center text-3xl font-black sm:text-4xl">Leaderboard</h1>
+        <StandingList standings={leaderboard.standings} className="mt-8" />
+        <div className="mt-10 flex justify-center">
+          <button
+            type="button"
+            onClick={() => hostAction(last ? "host:finish" : "host:advance")}
+            disabled={advancing}
+            className="rounded-xl bg-emerald-600 px-8 py-3 text-lg font-bold text-white hover:bg-emerald-500 disabled:opacity-50"
+          >
+            {advancing ? "…" : last ? "Final results →" : "Next Question →"}
+          </button>
+        </div>
+      </main>
+    );
+  }
+
+  if (phase === "podium" && podium) {
+    return (
+      <main className="mx-auto flex min-h-screen max-w-3xl flex-col px-6 py-10">
+        <p className="text-center text-sm font-semibold uppercase tracking-[0.3em] text-emerald-400">
+          Game over
+        </p>
+        <h1 className="mt-2 text-center text-4xl font-black sm:text-5xl">🏆 Podium</h1>
+        <StandingList standings={podium.standings} className="mt-10" celebrate />
+        <div className="mt-12 text-center">
+          <a href="/admin" className="text-indigo-400 hover:text-indigo-300">
+            ← Back to the Quiz library
+          </a>
+        </div>
       </main>
     );
   }
@@ -257,6 +348,50 @@ export function HostGame({ pin, questions }: { pin: string; questions: Question[
         </ul>
       )}
     </main>
+  );
+}
+
+// A ranked standing, shared by the interim Leaderboard and the final Podium: the
+// top three wear medals (and grow, on the Podium), everyone else shows a rank.
+function StandingList({
+  standings,
+  className = "",
+  celebrate = false,
+}: {
+  standings: Standing[];
+  className?: string;
+  celebrate?: boolean;
+}) {
+  return (
+    <ol className={`flex flex-col gap-3 ${className}`}>
+      {standings.map((s) => {
+        const medal = s.rank <= 3 ? MEDALS[s.rank - 1] : null;
+        const top = celebrate && s.rank === 1;
+        return (
+          <li
+            key={s.playerId}
+            className={`flex items-center gap-4 rounded-2xl border px-5 text-slate-100 ${
+              medal
+                ? "border-amber-500/40 bg-amber-500/10"
+                : "border-slate-800 bg-slate-900/60"
+            } ${top ? "py-6" : "py-4"}`}
+          >
+            <span className="w-10 text-center text-2xl font-black tabular-nums">
+              {medal ?? s.rank}
+            </span>
+            <span className="text-3xl" aria-hidden>
+              {avatarGlyph(s.avatar)}
+            </span>
+            <span className={`flex-1 truncate font-bold ${top ? "text-2xl" : "text-lg"}`}>
+              {s.name}
+            </span>
+            <span className="font-mono text-xl font-black tabular-nums text-emerald-400">
+              {s.score}
+            </span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
